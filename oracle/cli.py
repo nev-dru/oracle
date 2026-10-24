@@ -3,7 +3,8 @@
 import asyncio
 import json
 import sys
-from typing import Annotated, NoReturn
+from pathlib import Path
+from typing import Annotated, Any, NoReturn
 
 import typer
 
@@ -53,8 +54,10 @@ def ask_cmd(
 ) -> None:
     """Find things across every registered source (the default command)."""
     # Imported here: pydantic-ai is the slow import, and expand and tool commands never need it.
-    from oracle.ask import AskRequest, ask
+    from oracle.ask import LEVELS, AskRequest, ask
 
+    if level not in LEVELS:
+        _die(f"--level must be one of {', '.join(LEVELS)}")
     cfg, registry = _setup()
     req = AskRequest(question, intent, level, _csv(scope), _csv(prefer), session)
     try:
@@ -141,7 +144,71 @@ def _report(results: list[ExampleResult], registry: Registry) -> int:
     return len(results) - passed + len(registry.problems) + (0 if results else 1)
 
 
-COMMANDS = {"ask", "expand", "tool", "--help", "-h"}
+@app.command()
+def feedback(
+    call_id: Annotated[str, typer.Argument(help="the call_id from an answer's trace")],
+    useful: Annotated[str, typer.Option(help="yes or no")],
+    note: Annotated[str | None, typer.Option(help="what was wrong or missing")] = None,
+    source: Annotated[str, typer.Option(help="agent or human")] = "agent",
+) -> None:
+    """Record whether an answer was useful; cheap enough to call whenever one was wrong."""
+    if useful not in ("yes", "no"):
+        _die("--useful must be yes or no")
+    cfg, _ = _setup()
+
+    async def save() -> bool:
+        async with open_store(cfg.log_path) as store:
+            return await store.record_feedback(call_id, useful == "yes", note, source)
+
+    if not asyncio.run(save()):
+        _die(f"no call {call_id} in {cfg.log_path}")
+    typer.echo(f"recorded: {call_id} useful={useful}")
+
+
+@app.command("eval")
+def eval_cmd(
+    case: Annotated[
+        list[str] | None, typer.Option("--case", help="run only these case ids")
+    ] = None,
+    no_judge: Annotated[bool, typer.Option("--no-judge", help="skip the Sonnet judge")] = False,
+) -> None:
+    """Run golden.yaml at each case's level; exit 1 if any case fails. Spends model calls."""
+    from oracle.ask import Models
+    from oracle.evals import last_run, load_cases, report, run_case, save_run
+    from oracle.llm.models import resolve_model
+
+    cfg, registry = _setup()
+    cases = load_cases(REPO_ROOT / "golden.yaml", case)
+    if not cases:
+        _die(f"no golden cases match {case}")
+    try:
+        judge_model = None if no_judge else resolve_model(cfg.model("planner"))
+    except ConfigError as exc:
+        _die(str(exc))
+
+    async def run_all() -> list:
+        return [await run_case(c, cfg, registry, Models(), judge_model) for c in cases]
+
+    try:
+        results = asyncio.run(run_all())
+    except ConfigError as exc:
+        _die(str(exc))
+    path = cfg.home / "eval" / "last.json"
+    previous = last_run(path)
+    typer.echo(report(results, previous))
+    kept = [r for r in _previous_results(path) if r.get("id") not in {x.id for x in results}]
+    save_run(path, results, kept)
+    raise typer.Exit(0 if all(r.passed for r in results) else 1)
+
+
+def _previous_results(path: Path) -> list[dict[str, Any]]:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+
+
+COMMANDS = {"ask", "expand", "tool", "feedback", "eval", "--help", "-h"}
 
 
 def main() -> None:

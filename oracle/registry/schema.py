@@ -135,3 +135,46 @@ def placeholder_params(item: str) -> list[str]:
         else:
             out.append(body)
     return out
+
+
+RECIPE_NAME = r"^[a-z][a-z0-9-]*(\.[a-z][a-z0-9_]*)+$"
+
+
+class RecipeStep(Strict):
+    """One stage of a recipe. String params may use the recipe's params as `{name}`, the
+    resolved time window as `{window_start}` / `{window_end}`, and earlier stages as bindings
+    (`$search.pointers`)."""
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    op: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    after: list[str] = Field(default_factory=list)
+
+
+class Recipe(Strict):
+    """A composite op: a stored plan with free params. The planner sees it as one op."""
+
+    name: str = Field(pattern=RECIPE_NAME)
+    when: str
+    params: dict[str, Param] = Field(default_factory=dict)
+    steps: list[RecipeStep] = Field(min_length=1)
+    output: list[str] = Field(default_factory=list, description="stages whose results count")
+    on_empty: list[RecipeStep] = Field(
+        default_factory=list, description="run instead when every output stage returned nothing"
+    )
+    breadth: bool = False
+
+    @model_validator(mode="after")
+    def _stages_line_up(self) -> "Recipe":
+        ids = [s.id for s in self.steps] + [s.id for s in self.on_empty]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"duplicate stage ids: {ids}")
+        unknown = [a for s in self.steps + self.on_empty for a in s.after if a not in ids]
+        unknown += [o for o in self.output if o not in ids]
+        if unknown:
+            raise ValueError(f"unknown stage ids {unknown}")
+        return self
+
+    @property
+    def outputs(self) -> list[str]:
+        return self.output or [s.id for s in self.steps]

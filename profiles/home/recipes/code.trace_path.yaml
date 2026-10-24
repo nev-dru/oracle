@@ -1,0 +1,14 @@
+name: code.trace_path
+when: "How one part of the code talks to or reaches another: the call path from A to B."
+params:
+  source: {type: str, required: true, desc: "the starting side, e.g. 'salesforce'"}
+  target: {type: str, required: true, desc: "the far side, e.g. 'cloud'"}
+steps:
+  - {id: from, op: code-graph.find_symbol, params: {pattern: "{source}"}}
+  - {id: to, op: code-graph.find_symbol, params: {pattern: "{target}"}}
+  - {id: path, op: code-graph.path_between, params: {source: "$from.results[0].name", target: "$to.results[0].name"}}
+  - {id: about_source, op: code-search.search, params: {query: "{source}", limit: 5}}
+  - {id: about_target, op: code-search.search, params: {query: "{target}", limit: 5}}
+  # integrations usually have a design doc; the answer should cite it or say none was found
+  - {id: design, op: acli.confluence.search, params: {cql: "text ~ \"{source} {target}\"", limit: 5}}
+output: [path, from, to, about_source, about_target, design]

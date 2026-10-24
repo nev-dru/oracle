@@ -23,13 +23,27 @@ def load(name: str) -> list[dict]:
     rows = json.loads((DATA / f"{name}.json").read_text())
     for row in rows:
         for key in [k for k in row if k.endswith("_offset_h")]:
-            stamp = NOW + timedelta(hours=row.pop(key))
+            stamp = offset_stamp(row.pop(key))
             row[key[: -len("_offset_h")]] = stamp.isoformat(timespec="seconds")
         for key in [k for k in row if k.endswith("_today")]:
             hour, minute = (int(x) for x in row.pop(key).split(":"))
             stamp = NOW.replace(hour=hour, minute=minute, second=0, microsecond=0)
             row[key[: -len("_today")]] = stamp.isoformat(timespec="seconds")
     return rows
+
+
+TODAY_HOURS = 12
+
+
+def offset_stamp(hours: float) -> datetime:
+    """NOW + hours, except that an offset within the last TODAY_HOURS stays today: early in the
+    morning all such rows are spread over the time since midnight, in the same order, so a
+    "today" fixture does not slide into yesterday before 8am."""
+    midnight = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
+    early = NOW - midnight < timedelta(hours=TODAY_HOURS)
+    if early and -TODAY_HOURS <= hours <= 0:
+        return midnight + (NOW - midnight) * ((TODAY_HOURS + hours) / TODAY_HOURS)
+    return NOW + timedelta(hours=hours)
 
 
 def emit(obj: object) -> None:

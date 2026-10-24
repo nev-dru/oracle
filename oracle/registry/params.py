@@ -1,16 +1,27 @@
 """Validate and coerce op params against a manifest; the planner and executor share this check."""
 
 import json
-from typing import Any
+import re
+from typing import Any, Protocol
 
-from oracle.registry.schema import Op, Param
+from oracle.registry.schema import Param
 
 
 class ParamError(ValueError):
     pass
 
 
-def validate_params(op: Op, raw: dict[str, Any]) -> dict[str, Any]:
+class HasParams(Protocol):
+    """An op or a recipe: anything with a name and declared params."""
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def params(self) -> dict[str, Param]: ...
+
+
+def validate_params(op: HasParams, raw: dict[str, Any]) -> dict[str, Any]:
     unknown = sorted(set(raw) - set(op.params))
     if unknown:
         raise ParamError(f"unknown params {unknown}; {op.name} takes {sorted(op.params)}")
@@ -74,3 +85,29 @@ def _check(name: str, spec: Param, value: Any) -> Any:
     if isinstance(value, str) and not value.strip():
         raise ParamError(f"param {name!r} is empty")
     return value
+
+
+TEMPLATE = re.compile(r"^\$|\{[a-z_]+\}")
+_DUMMY: dict[str, Any] = {"str": "x", "int": 1, "bool": True, "list[str]": ["x"], "json": {}}
+
+
+def is_deferred(value: Any) -> bool:
+    """A binding (`$s1.ids`) or a template (`assignee = "{name}"`): known only at run time."""
+    return isinstance(value, str) and bool(TEMPLATE.search(value))
+
+
+def validate_shape(op: HasParams, raw: dict[str, Any]) -> dict[str, Any]:
+    """validate_params with deferred values stood in for by a value of the declared type, so a
+    plan or recipe is checked for names, required params and literal values before it runs."""
+    stand_in = {
+        k: _stand_in(op.params[k]) if k in op.params and is_deferred(v) else v
+        for k, v in raw.items()
+    }
+    return validate_params(op, stand_in)
+
+
+def _stand_in(spec: Param) -> Any:
+    """A valid value of the declared type: the first enum value, or the default, or a dummy."""
+    if spec.enum:
+        return spec.enum[0]
+    return spec.default if spec.default is not None else _DUMMY[spec.type]

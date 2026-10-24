@@ -1,0 +1,12 @@
+name: code.find_and_expand
+when: "Where something happens in code: find the code by meaning, then list its callers."
+params:
+  concept: {type: str, required: true, desc: "what the code does, 2-6 words, e.g. 'ownership transfer'"}
+steps:
+  - {id: search, op: code-search.search, params: {query: "{concept}", limit: 10}}
+  # vex returns chunk ids, not graph ids: map each hit's path:line to its enclosing symbol
+  - {id: symbols, op: code-graph.symbols_at, params: {at: "$search.pointers"}}
+  - {id: callers, op: code-graph.expand, params: {ids: "$symbols.ids", direction: callers}}
+output: [search, symbols, callers]
+on_empty:
+  - {id: by_name, op: code-graph.find_symbol, params: {pattern: "{concept}"}}

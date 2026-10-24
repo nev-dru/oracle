@@ -9,4 +9,6 @@ tools = ["code-search", "code-graph", "acli", "workiq"]
 path_prepend = ["../adapters/bin", "../tests/fakes/bin"]
 
 [env]
+# The code tools see only the fixture repo, so evals do not depend on what else is indexed.
 VEX_DB = "${PROFILE_DIR}/../.fixtures/vex.db"
+CMM_REPOS = "acme"

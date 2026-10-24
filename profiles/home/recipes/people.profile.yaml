@@ -1,0 +1,9 @@
+name: people.profile
+when: "Who someone is: role, team and manager, plus their recent tickets and messages."
+params:
+  name: {type: str, required: true, desc: "the person's name as given; a first name alone is fine"}
+breadth: true
+steps:
+  - {id: directory, op: workiq.people.lookup, params: {name: "{name}"}}
+  - {id: tickets, op: acli.jira.search, params: {jql: "assignee = \"{name}\" ORDER BY updated DESC", limit: 10}}
+  - {id: messages, op: workiq.teams.search, params: {sender: "{name}", since: "-14d", limit: 10}}

@@ -35,9 +35,17 @@ def cmm(tool: str, args: dict) -> dict:
 
 
 def projects() -> list[dict]:
-    """Indexed projects whose source still exists; a moved or deleted checkout is skipped."""
+    """Indexed projects whose source still exists; a moved or deleted checkout is skipped.
+    CMM_REPOS (comma-separated repo names) limits the view, so a test profile sees only its
+    fixture repo."""
     found = cmm("list_projects", {}).get("projects", [])
-    return [p for p in found if os.path.isdir(p.get("root_path", ""))]
+    wanted = {r for r in os.environ.get("CMM_REPOS", "").split(",") if r}
+    return [
+        p
+        for p in found
+        if os.path.isdir(p.get("root_path", ""))
+        and (not wanted or os.path.basename(p["root_path"]) in wanted)
+    ]
 
 
 def roots() -> dict[str, str]:
@@ -239,7 +247,8 @@ def spans(project: str, rel_path: str) -> list[tuple[int, int, list[str]]]:
 
 
 def enclosing(project: str, root: str, location: str) -> dict | None:
-    path, _, line_s = location.rpartition(":")
+    """`path:line`, also as an oracle pointer (`code:/abs/path:line`)."""
+    path, _, line_s = location.removeprefix("code:").rpartition(":")
     if not line_s.isdigit():
         raise SystemExit(f"expected path:line, got {location!r}")
     line = int(line_s)
@@ -253,7 +262,7 @@ def enclosing(project: str, root: str, location: str) -> dict | None:
 def cmd_symbols_at(a: argparse.Namespace) -> dict:
     known = roots()
     out: list[dict] = []
-    for location in [x for x in a.at.split(",") if x]:
+    for location in [x.removeprefix("code:") for x in a.at.split(",") if x]:
         for project in pick_projects(a.repo, known):
             root = known[project]
             if os.path.isabs(location) and not location.startswith(root + os.sep):

@@ -15,13 +15,14 @@ from typing import Any, Literal
 
 from oracle.exec.parse import ParseError, parse_output
 from oracle.exec.pointers import pointer_for, record_id
+from oracle.exec.redact import redact
 from oracle.exec.runners.argv import ArgvError, build_argv, is_set
 from oracle.registry import jsonpath
 from oracle.registry.loader import Registry
 from oracle.registry.params import ParamError, validate_params
 from oracle.registry.schema import Op, Tool
 
-Status = Literal["ok", "error", "not_configured", "invalid"]
+Status = Literal["ok", "error", "not_configured", "invalid", "skipped", "unavailable"]
 STDERR_TAIL = 400
 
 
@@ -123,10 +124,12 @@ class Executor:
             doc, records = parse_output(text, op.returns)
         except ParseError as exc:
             raise OpFailed("error", str(exc)) from None
-        for record in records:
-            result.records.append(record)
-            result.pointers.append(pointer_for(record, op.returns, tool.name))
-            rid = record_id(record, op.returns)
+        for raw_record in records:
+            # ids and pointers come from the record as returned (a slug can look like a key);
+            # everything kept, cached or shown to a model is redacted
+            result.records.append(redact(raw_record))
+            result.pointers.append(pointer_for(raw_record, op.returns, tool.name))
+            rid = record_id(raw_record, op.returns)
             if rid is not None:
                 result.ids.append(rid)
         return doc

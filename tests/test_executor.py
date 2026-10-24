@@ -157,3 +157,18 @@ async def test_fake_jira_refuses_clauses_it_cannot_check(home_cfg, fake_registry
     assert result.status == "error" and "unsupported clause" in (result.error or "")
     quoted = await ex.run("acli.jira.search", {"jql": 'text ~ "order by" AND status = Done'})
     assert quoted.ok and quoted.records == []
+
+
+async def test_spill_head_is_redacted_on_expand(tmp_path: Path) -> None:
+    from oracle.exec.pointers import expand_spill
+
+    body = (
+        "import json\n"
+        "items = [{'id': i, 'env': 'password=hunter2 ' + 'x' * 300} for i in range(20)]\n"
+        "print(json.dumps({'items': items}))\n"
+    )
+    tool = script_tool(tmp_path, body, limits={"max_output_kb": 2})
+    result = await executor_for(tool, tmp_path).run("t.run", {})
+    assert result.spill and "hunter2" not in str(result.records)
+    shown = expand_spill(result.spill, tmp_path / "spill")
+    assert "hunter2" not in shown["head"] and "[REDACTED]" in shown["head"]

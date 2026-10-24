@@ -58,7 +58,8 @@ class CallRecord:
     confidence: str | None = None
     gaps: list[str] = field(default_factory=list)
     ran_level: str | None = None
-    """The level that actually ran (M1 runs every call as quick)."""
+    """The level that actually ran (deep runs as standard until M4)."""
+    replans: int = 0
 
 
 @dataclass
@@ -80,7 +81,7 @@ class Store:
             " gaps, ran_level) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 c.call_id, c.session, time.time(), c.query, c.intent, c.level, int(c.breadth),
-                json.dumps(c.ranked_tools), json.dumps(c.plan), 0, 0, c.wall_ms,
+                json.dumps(c.ranked_tools), json.dumps(c.plan), c.replans, 0, c.wall_ms,
                 c.tokens_in, c.tokens_out, c.model_calls, c.confidence, json.dumps(c.gaps),
                 c.ran_level or c.level,
             ),
@@ -105,6 +106,20 @@ class Store:
             rows,
         )
         await self.db.commit()
+
+    async def record_feedback(
+        self, call_id: str, useful: bool, note: str | None, source: str
+    ) -> bool:
+        """False when no such call was logged."""
+        async with self.db.execute("SELECT 1 FROM calls WHERE call_id = ?", (call_id,)) as cur:
+            if await cur.fetchone() is None:
+                return False
+        await self.db.execute(
+            "INSERT INTO feedback VALUES (?,?,?,?,?)",
+            (call_id, source, int(useful), note, time.time()),
+        )
+        await self.db.commit()
+        return True
 
     async def lookup(self, pointer: str, session: str | None) -> Expanded | None:
         """Newest record for a pointer: in `session` if given, else any session within 24 h."""

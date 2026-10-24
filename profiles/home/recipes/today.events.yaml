@@ -1,0 +1,9 @@
+name: today.events
+when: "What happened or is happening today: meetings, ticket changes, deploys, cluster events, messages."
+breadth: true
+steps:
+  - {id: meetings, op: workiq.calendar.today}
+  - {id: tickets, op: acli.jira.search, params: {jql: "updated >= startOfDay() ORDER BY updated DESC", limit: 20}}
+  - {id: deploys, op: argocd.app.history, params: {since: "{window_start}"}}
+  - {id: cluster, op: kubectl.events, params: {since: "24h"}}
+  - {id: messages, op: workiq.teams.search, params: {since: "{window_start}", limit: 20}}

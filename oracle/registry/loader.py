@@ -4,13 +4,15 @@ A broken manifest is reported and skipped, never fatal: one bad file must not ta
 other tool. Mutating tools are refused and mutating ops dropped, so read-only holds at every tier.
 """
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 from pydantic import ValidationError
 
-from oracle.registry.schema import Op, Tool
+from oracle.registry.params import ParamError, validate_shape
+from oracle.registry.schema import Op, Recipe, Tool
 
 
 @dataclass
@@ -21,6 +23,9 @@ class Registry:
     notes: list[str] = field(default_factory=list)
     """Expected states worth showing: refused mutating ops, references to tools not added yet."""
     inactive: list[str] = field(default_factory=list)
+    recipes: dict[str, Recipe] = field(default_factory=dict)
+    known_tools: set[str] = field(default_factory=set)
+    """Every tool with a valid manifest, active or not."""
 
     def resolve(self, ref: str) -> tuple[Tool, Op]:
         """`code-graph.find_symbol` -> (tool, op). Op names may contain dots (`jira.search`)."""
@@ -34,7 +39,10 @@ class Registry:
         return [f"{t.name}.{op.name}" for t in self.tools.values() for op in t.ops]
 
 
-def load_registry(directory: Path, active: set[str] | None = None) -> Registry:
+def load_registry(
+    directory: Path, active: set[str] | None = None, recipes: Path | None = None
+) -> Registry:
+    """Manifests from `directory`; recipes from `recipes`, default the sibling `recipes/`."""
     reg = Registry()
     if not directory.is_dir():
         reg.problems.append(f"registry directory {directory} does not exist")
@@ -45,8 +53,82 @@ def load_registry(directory: Path, active: set[str] | None = None) -> Registry:
             reg.inactive.append(tool.name)
         else:
             reg.tools[tool.name] = tool
+    reg.known_tools = {t.name for t in loaded}
     _check_references(reg, loaded)
+    _load_recipes(recipes or directory.parent / "recipes", reg)
     return reg
+
+
+def _load_recipes(directory: Path, reg: Registry) -> None:
+    for path in sorted(directory.glob("*.yaml")) if directory.is_dir() else []:
+        _load_recipe(path, reg)
+
+
+def _load_recipe(path: Path, reg: Registry) -> None:
+    try:
+        recipe = Recipe.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, ValidationError) as exc:
+        reg.problems.append(f"recipes/{path.name}: {exc}")
+        return
+    if recipe.name in reg.op_refs():
+        reg.problems.append(f"recipes/{path.name}: {recipe.name} collides with an op")
+        return
+    typos = _template_typos(recipe)
+    if typos:
+        reg.problems.append(f"recipes/{path.name}: {'; '.join(typos)}")
+        return
+    missing = []
+    for stage in recipe.steps + recipe.on_empty:
+        problem = _stage_problem(reg, stage.op, stage.params)
+        if problem == "missing":
+            missing.append(stage.op)
+        elif problem:
+            reg.problems.append(f"recipes/{path.name}: stage {stage.id}: {problem}")
+            return
+    if missing:
+        reg.notes.append(f"{recipe.name}: runs without {sorted(set(missing))} (not active here)")
+    reg.recipes[recipe.name] = recipe
+
+
+RECIPE_BUILTINS = {"window_start", "window_end"}
+STAGE_REF = re.compile(r"\$([a-z][a-z0-9_]*)\.")
+TEMPLATE_REF = re.compile(r"\{([a-z_]+)\}")
+
+
+def _template_typos(recipe: Recipe) -> list[str]:
+    """`$stage` must name a stage of this recipe; `{name}` a declared param or a builtin."""
+    stages = {s.id for s in recipe.steps + recipe.on_empty}
+    names = set(recipe.params) | RECIPE_BUILTINS
+    out = []
+    for stage in recipe.steps + recipe.on_empty:
+        for key, value in stage.params.items():
+            if not isinstance(value, str):
+                continue
+            out += [
+                f"stage {stage.id} param {key}: no stage {ref!r}"
+                for ref in STAGE_REF.findall(value)
+                if ref not in stages
+            ]
+            out += [
+                f"stage {stage.id} param {key}: no param {ref!r}"
+                for ref in TEMPLATE_REF.findall(value)
+                if ref not in names
+            ]
+    return out
+
+
+def _stage_problem(reg: Registry, ref: str, params: dict) -> str | None:
+    """None if fine, "missing" if the tool is not active here, else what is wrong."""
+    tool = ref.partition(".")[0]
+    if tool not in reg.tools:
+        return "missing"
+    try:
+        validate_shape(reg.resolve(ref)[1], params)
+    except KeyError:
+        return f"{ref} is not an op of {tool}"
+    except ParamError as exc:
+        return f"{ref}: {exc}"
+    return None
 
 
 def _load_one(path: Path, reg: Registry) -> Tool | None:

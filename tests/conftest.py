@@ -38,3 +38,51 @@ def script_tool(tmp_path: Path, body: str, **manifest: object) -> Tool:
     op.update(manifest.pop("op", {}))  # type: ignore[arg-type]
     data = {"name": "t", "description": "test tool", "ops": [op], **manifest}
     return Tool.model_validate(yaml.safe_load(yaml.safe_dump(data)))
+
+
+def _final(info, body):  # type: ignore[no-untyped-def]
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+
+    return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, body)])
+
+
+def scripted(*outputs: dict):  # type: ignore[no-untyped-def]
+    """A model answering with each output in turn (the last one repeats)."""
+    from pydantic_ai.models.function import FunctionModel
+
+    queue = list(outputs)
+
+    def respond(messages, info):  # type: ignore[no-untyped-def]
+        return _final(info, queue.pop(0) if len(queue) > 1 else queue[0])
+
+    return FunctionModel(respond)
+
+
+def prompt_text(messages) -> str:  # type: ignore[no-untyped-def]
+    from pydantic_ai.messages import UserPromptPart
+
+    return "\n".join(
+        str(p.content) for m in messages for p in m.parts if isinstance(p, UserPromptPart)
+    )
+
+
+def echo_distiller(confidence: str = "high", limit: int = 15):  # type: ignore[no-untyped-def]
+    """A distiller citing the first pointers it was shown, in order, one finding each."""
+    import re
+
+    from pydantic_ai.models.function import FunctionModel
+
+    def respond(messages, info):  # type: ignore[no-untyped-def]
+        pointers = re.findall(r"^  (\S+) \| ", prompt_text(messages), flags=re.M)
+        findings = [{"text": f"found {p}", "pointer": p} for p in pointers[:limit]]
+        return _final(info, {"findings": findings, "confidence": confidence, "gaps": [],
+                             "refine": ['oracle "narrower question"']})  # fmt: skip
+
+    return FunctionModel(respond)
+
+
+def plan(*steps: dict, breadth: bool = False, expect: str = "") -> dict:
+    return {"interpretation": "i", "steps": list(steps), "breadth": breadth, "expect": expect}
+
+
+DONE = {"complete": True, "sufficient": True, "gaps": [], "next_steps": []}

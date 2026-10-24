@@ -10,7 +10,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from oracle.llm import claude_code
 from oracle.llm.models import resolve_model
 from oracle.plan.models import Plan, Step, plan_errors
-from oracle.plan.planner import build_planner, make_plan, render_request
+from oracle.plan.planner import Shortlist, build_planner, make_plan, render_request
 from oracle.rank.index import Ranker
 from oracle.registry.loader import Registry
 
@@ -55,7 +55,7 @@ async def test_planner_retries_with_validation_feedback(fake_registry: Registry)
         plan("acli.jira.search", query="oops"),
         plan("acli.jira.search", jql='text ~ "transfer"'),
     )
-    shortlist = Ranker(fake_registry).rank("tickets about transfer")
+    shortlist = Shortlist(Ranker(fake_registry).rank("tickets about transfer"))
     outcome = await make_plan(
         build_planner(model),
         question="tickets about transfer",
@@ -66,13 +66,15 @@ async def test_planner_retries_with_validation_feedback(fake_registry: Registry)
         now=datetime.now().astimezone(),
     )
     assert outcome.plan.steps[0].params == {"jql": 'text ~ "transfer"'}
-    assert outcome.model_calls == 2
+    assert outcome.usage.model_calls == 2
     retry_prompt = claude_code.transcript(seen[1])
     assert "rejected" in retry_prompt and "unknown params ['query']" in retry_prompt
 
 
 def test_request_lists_shortlist_ops_and_params(fake_registry: Registry) -> None:
-    shortlist = Ranker(fake_registry).rank("who is andrew neville")
+    ranker = Ranker(fake_registry)
+    q = "who is andrew neville"
+    shortlist = Shortlist(ranker.rank(q), ranker.rank_recipes(q))
     text = render_request(
         "who is andrew neville", "onboarding", shortlist, fake_registry, 1, datetime(2026, 1, 2)
     )
@@ -80,6 +82,7 @@ def test_request_lists_shortlist_ops_and_params(fake_registry: Registry) -> None
     assert "- workiq.people.lookup:" in text
     assert "name: str, required" in text
     assert "Step limit: 1" in text
+    assert text.index("- people.profile:") < text.index("Tools:")  # recipes come first
 
 
 def test_resolve_model_routes_claude_code_prefix() -> None:
@@ -144,3 +147,19 @@ def test_transcript_includes_prior_answer_and_ignores_plain_tool_returns() -> No
     assert text.startswith("plan this")
     assert '{"steps": []}' in text
     assert "processed" not in text
+
+
+async def test_claude_code_call_times_out_instead_of_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    async def stuck(*, prompt: str, options: Any):
+        await asyncio.sleep(10)
+        yield result_message()
+
+    monkeypatch.setattr("claude_agent_sdk.query", stuck)
+    monkeypatch.setattr(claude_code, "CALL_TIMEOUT_S", 0.05)
+    agent: Agent[Any, str] = Agent(claude_code.claude_code_model("sonnet"))
+    with pytest.raises(claude_code.ClaudeCodeError, match="no result in"):
+        await agent.run("hi")

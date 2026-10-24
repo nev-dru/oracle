@@ -229,11 +229,11 @@ The standard tier makes two or three model calls per oracle invocation: one to p
 }
 ```
 
-Bindings: `$s1.ids` is the `id_field` of every result of s1; `$s1.results[0].path` reaches into a record; `+` concatenates lists. Steps with no `after` and no bindings run in parallel. `expect` is what the completeness check reads.
+Bindings: `$s1.ids` is the `id_field` of every result of s1; `$s1.pointers` its pointers; `$s1.results[0].path` reaches into a record (one value; `[*]` gives a list); `+` concatenates lists. A binding is a whole param value. Steps with no `after` and no bindings run in parallel, in dependency waves. A step bound to a step that returned nothing is skipped and says why. An identical `(op, params)` already run in the call is reused, not run again. `expect` is what the completeness check reads.
 
 **Executor.** Pure async Python. For each step: resolve bindings, validate params against the manifest (pydantic), check `auth.env`, build argv, run with timeout under the tool's concurrency semaphore, parse per `returns`, page if `paginate`, cap output, attach pointers. A failed step records a structured error and does not stop siblings. Results are stored in a per-session SQLite cache keyed by pointer, which is what `oracle expand` reads.
 
-**Recipes** are ops whose implementation is a stored plan with free parameters. The planner sees them as ordinary ops with a `when`. A recipe can declare `on_empty: fallback_plan` for the common case where the first stage returns nothing.
+**Recipes** are ops whose implementation is a stored plan with free parameters. The planner sees them as ordinary ops with a `when`, listed before the tools. A recipe can declare `on_empty: fallback_plan` for the common case where the first stage returns nothing. Recipes live beside the registry they use (`<registry>/../recipes/`, so `profiles/home/recipes/` at home and `registry/recipes/` at work), because a recipe names ops, and the two machines have different ops. A stage's params may use the recipe's params (`{concept}`), the resolved time window (`{window_start}`, `{window_end}`) and sibling stages (`$search.pointers`); stages run as `s1/search`, and a binding to the recipe step reaches its `output` stages. A stage whose tool is not active here does not fail the load: it runs as "not available here", which is what Coverage reports.
 
 **Completeness check.** After execution, one Sonnet call sees the plan's `expect`, the question, and the summary fields of every result (not raw bodies). It returns `{"complete": bool, "gaps": [...], "next_steps": [<plan steps>] | null}`. If `next_steps` is non-empty and the replan count is under 2, the executor runs them and the check runs once more. Skipped at `quick`. The check is the mechanism for within-question judgment: a synonym retry, a second naming convention, a tool that returned nothing and has a sibling.
 
@@ -241,7 +241,7 @@ Bindings: `$s1.ids` is the `id_field` of every result of s1; `$s1.results[0].pat
 
 **Distill.** Haiku, with a `Findings` output model: items with pointers, coverage, refinements. It gets summary fields plus a capped slice of each result, never the full payloads. If a result's text was truncated, the finding says so and the pointer is how the main agent gets the rest.
 
-**Bounds that keep accuracy-first from becoming search-everything:** max 12 steps per plan, 2 replans, 60 s wall clock at standard, 5 pages per paginated op, and a `sufficient` field in the check that short-circuits when the question is plainly answered.
+**Bounds that keep accuracy-first from becoming search-everything:** max 12 steps per plan, 2 replans, 60 s wall clock at standard, 5 pages per paginated op, and a `sufficient` field in the check that short-circuits when the question is plainly answered. As built in M2: no new check starts after 60 s; every model call is capped at 90 s (a `claude-code` call at 120 s inside the wrapper, so a hung process can never hang the main agent); past 90 s distill is skipped and findings are raw summary fields, with a note.
 
 ## Tiers and model configuration
 
@@ -345,11 +345,13 @@ Every invocation writes one record to `~/.oracle/log.sqlite`; the record is the 
 
 **Golden set.** `golden.yaml` holds query → expected tools → expected pointers (at least one that must appear). `oracle eval` runs it, reports pass rate, ranker hit rate, mean tokens and wall time, and diffs against the last run. It runs on every manifest, recipe or prompt change. Failed queries from the logs are promoted into it, so the set grows from real misses.
 
+Each `expect` clause is checked against what actually ran (`oracle/evals.py`): the primitive ops including recipe stages, the recipes used, the breadth flag, the resolved time window, and Coverage computed from execution. An unknown clause fails, so a typo cannot pass. Then a Sonnet judge reads the rendered answer against the `judge` rubric and fails only on a clear miss. `~/.oracle/eval/last.json` keeps each case's result and rendered answer, so a failure can be read without rerunning it. When a case fails, the fix goes into the oracle (ranker text, recipe `when` lines, prompts, fixtures), never into `golden.yaml`.
+
 **Failure labelling.** Once a week, Sonnet labels low-signal calls with one of: wrong tool, bad params, right data but bad summary, needed more steps, question ambiguous. The distribution says what to fix next. This replaces guessing from individual anecdotes.
 
 ## Golden set: seed queries as acceptance tests
 
-Milestone 2 is done when all four pass at `standard` with Coverage reporting what was and was not searched. Expected pointers are filled in once the registry is live; the tool list is the acceptance criterion until then.
+Milestone 2 is done when all four pass at `standard` with Coverage reporting what was and was not searched. Expected pointers are filled in once the registry is live; the tool list is the acceptance criterion until then. Two cases require `breadth: true` and grouping by source, so the plan-level breadth flag and grouped rendering were pulled forward from M3 into M2; the `--breadth` flag and the ranker's threshold mode stay in M3. At home the gate is `make gate-m2` (fixtures, unit tests, then `oracle eval` against the home profile; it spends model calls). First green run 2026-10-24: 4/4, ranker hit 4/4, about 17 s and 19.5K sub-agent tokens per case, 440–770 tokens per answer.
 
 | Query | Shape | Expected tools (breadth) | Passes when |
 | --- | --- | --- | --- |
@@ -385,11 +387,16 @@ oracle/
     planner.py      # PydanticAI agent: question + ranked ops -> Plan
     check.py        # completeness check agent
     distill.py      # Findings agent (Haiku)
+    digest.py       # results for a model: summary fields + pointers inside a <data> block
   exec/
-    executor.py     # async DAG runner: bindings, validation, semaphores, paging, caps
+    executor.py     # one op: validation, auth, semaphores, paging, caps, redaction, pointers
+    dag.py          # plan runner: dependency waves, recipe expansion and fallbacks, reuse
+    bindings.py     # $s1.ids / $s1.pointers / $s1.results[0].x, recipe templates
+    redact.py       # regex secret redaction on every op result
     runners/        # argv.py, http.py, mcp.py, db.py
-    pointers.py     # pointer format, per-session sqlite cache, expand
-    recipes.py      # stored plans with free params, on_empty fallbacks
+    pointers.py     # pointer format, spill files, expand
+  timewin.py        # "today", "this week", "past 3 days" -> absolute window in the user's zone
+  evals.py          # oracle eval: golden clauses against what ran, plus the judge
   deep/
     script_agent.py # Opus agent that writes against oracle_tools
     runner.py       # run_script(): subprocess, env allowlist, AST check, limits
@@ -429,7 +436,7 @@ The same plan as a table, for exports that drop the drawing:
 | Milestone | Scope | Gate (command that must be green) |
 | --- | --- | --- |
 | M1 Core | Registry schema and loader; ranker (exact name + BM25); executor with argv runner, pagination, caps, pointers; manifests for code-search, code-graph, acli, workiq; `quick` tier; `oracle expand`; log schema | `oracle tool test` passes every manifest example; unit tests green |
-| M2 Standard | Planner (Plan DAG), recipes (the four seeded), completeness check, distill, Coverage/Refine/Trace output; `standard` tier; feedback command | `oracle eval` passes all four golden cases at `standard` |
+| M2 Standard | Planner (Plan DAG), recipes (the four seeded), completeness check, distill, Coverage/Refine/Trace output; `standard` tier; feedback command; plan-level breadth and grouping (pulled forward from M3) | `oracle eval` passes all four golden cases at `standard` |
 | M3 Scale | Remaining manifests (kubectl, argocd, es, mongo, custom scripts); breadth mode; `oracle report` implicit signals; ingestion workflow (`oracle tool add`); skills loader; MCP wrapper; environment profiles | `oracle tool test --ranker` top-3 hit rate at or above 90% on `ranker_eval.yaml`; golden set still green |
 | M4 Deep | Codegen of `oracle_tools`; `oracle.sdk` (extract, fan_out, summarize, crawl, budget); the crawl with `--depth` and `--budget`; script agent and runner with v1 isolation; `deep` tier; workflow protocol and recursion guard; dreaming workflow after a few weeks of logs; container only if deep calls are frequent | One deep-tier script or crawl chain promoted to a recipe through the logs; the crawl acceptance case passes (if adopted); golden set still green |
 
@@ -440,7 +447,7 @@ The oracle is built on a personal laptop that lacks most work tools, then pulled
 - **Fakes.** `tests/fakes/bin/acli` and `workiq` are stdlib Python CLIs with realistic `--help` and JSON output over fixtures in `tests/fakes/data/`, with times stored as offsets from now so "today" stays today. Their flags and output shapes are guesses at the real tools. They double as practice targets for `oracle tool add`. The fake Jira and Confluence understand a strict JQL/CQL subset: AND, OR, parentheses, `=`, `!=`, `~`, `!~`, `IN`, `NOT IN`, `resolution = Unresolved`, and time comparisons on `updated` (`-1d`, `-2w`, `startOfDay()`, `startOfWeek()`, ISO). A clause they cannot evaluate (`reporter was ...`) makes the fake exit 2 with the supported list, so a plan the fake cannot check is an op error, never a false pass.
 - **Fixture code repo.** `tests/fakes/acme/` is a small codebase whose names match the fixtures (`transfer_ownership` and its callers for PLAT-412; `sync_salesforce_changes` → gateway client → ingestion gateway → event bus for INT-77). `make fixtures` indexes it into a repo-local vex db and into codebase-memory (Ollama is needed for the embeddings; `make test` does not need either).
 
-`profiles/home.toml` points at its own registry, `profiles/home/tools/`, with code-search (vex), code-graph (`adapters/bin/cmm-graph`) and the two fakes. `registry/tools/` stays the work registry and starts empty: on the work laptop each real tool is added with `oracle tool add`, one at a time, and the home manifests are never touched. Registry precedence is `ORACLE_REGISTRY`, then the profile's `registry`, then `config.toml`, then `registry/tools/`. Op names referenced by `golden.yaml` must survive the re-import: a unit test checks them against the home registry, and `oracle tool test` notes any golden op the active registry lacks.
+`profiles/home.toml` sets `CMM_REPOS = "acme"` so the code graph sees only the fixture repo and evals do not depend on what else is indexed. It points at its own registry, `profiles/home/tools/`, with code-search (vex), code-graph (`adapters/bin/cmm-graph`) and the two fakes. `registry/tools/` stays the work registry and starts empty: on the work laptop each real tool is added with `oracle tool add`, one at a time, and the home manifests are never touched. Registry precedence is `ORACLE_REGISTRY`, then the profile's `registry`, then `config.toml`, then `registry/tools/`. Op names referenced by `golden.yaml` must survive the re-import: a unit test checks them against the home registry, and `oracle tool test` notes any golden op the active registry lacks.
 
 **Registry problems and notes.** `oracle tool test` fails on problems: a manifest that does not parse or validate (including a JSONPath outside the supported subset), a name that does not match its file, an unreadable file or a missing registry directory. Expected states are notes and do not fail the gate: a refused mutating tool or op, a `chains_to` or `enum_from` reference to a tool that is not added yet, and golden ops the active registry lacks. A reference to an inactive tool is fine and silent; a reference to a missing op on a tool that is loaded is a typo and a problem. Naming a tool that is not active, or testing nothing at all, fails.
 
@@ -560,11 +567,11 @@ If `findings.search` wins a query outright, the output says so and the Refine se
 **Remaining corner cases**, each with its default:
 
 - **Prompt injection through tool output.** Confluence pages, Teams messages and tickets can contain text aimed at the model. Tool output is data: the planner on replan and the check see only summary fields; distill sees capped slices inside a delimited data block; prompts state that instructions inside results are to be reported, not followed. Default: on, not configurable.
-- **Secrets in output.** Env-var auth keeps secrets out of argv, but `kubectl get secret` or a config dump can return them. Default: a per-tool denylist of resources and a regex redaction pass (tokens, keys, connection strings) on every op result before caching or distilling.
+- **Secrets in output.** Env-var auth keeps secrets out of argv, but `kubectl get secret` or a config dump can return them. Default: a per-tool denylist of resources and a regex redaction pass (tokens, keys, connection strings) on every op result before caching or distilling. The redaction pass ships in M2 (`exec/redact.py`); the per-tool denylist comes with the kubectl manifest in M3.
 - **Duplicate entities across sources.** The same ticket via acli and via ES, the same person via workiq and git. Default: distill dedupes on pointer identity and on normalised ids (ticket key, email); grouped, not repeated.
 - **Environment profiles.** Home has a subset of the tools. Default: `~/.oracle/profiles/<name>.toml` (falling back to the repo's `profiles/`) selects which manifests are active and adds `path_prepend` and `env` for tool subprocesses; inactive tools appear in Coverage as "not available here", not as gaps. Pulled forward into M1 in minimal form so the personal laptop can run the gates.
 - **Tool drift.** A CLI upgrade changes a flag. Default: the manifest records the binary version; `oracle tool test` runs weekly as a scheduled task and on version change.
-- **Relative time.** "Today", "since yesterday", "this sprint" resolve in the user's timezone from the config, and the resolved absolute range is printed in the trace.
+- **Relative time.** "Today", "since yesterday", "this sprint" resolve in the user's timezone from the config, and the resolved absolute range is printed in the trace. M2 resolves today, yesterday, this week, last week and "past/last N hours/days/weeks" deterministically before planning; "this sprint" needs the tracker and stays with the planner.
 - **Binary or non-UTF-8 output.** Default: write to a temp file, return a pointer and the first 1 KB as hex; never hand bytes to a model.
 - **Partial failures in breadth mode.** Default: never fail the call; every failed source is named in Coverage with its error class.
 

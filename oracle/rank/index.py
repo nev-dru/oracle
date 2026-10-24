@@ -12,7 +12,7 @@ costs only planner tokens.
 import re
 from dataclasses import dataclass, field
 
-from rank_bm25 import BM25Okapi
+from rank_bm25 import BM25Plus
 
 from oracle.registry.loader import Registry
 
@@ -83,6 +83,26 @@ def _stem(word: str) -> str:
     return word
 
 
+class Lexical:
+    """BM25Plus over token documents, counting only documents that share a word with the query.
+
+    BM25Plus keeps term weights positive however few documents there are: with BM25Okapi a word
+    in half the documents weighs zero, and with one or two recipes nothing ever matches, which is
+    exactly the state of a registry being filled one tool at a time. The overlap rule stops
+    BM25Plus's floor from scoring documents with no word in common.
+    """
+
+    def __init__(self, docs: list[list[str]]) -> None:
+        self.words = [set(d) for d in docs]
+        self._bm25 = BM25Plus(docs) if docs else None
+
+    def scores(self, query: list[str]) -> list[float]:
+        if self._bm25 is None or not query:
+            return [0.0] * len(self.words)
+        raw = self._bm25.get_scores(query)
+        return [float(raw[i]) if self.words[i] & set(query) else 0.0 for i in range(len(raw))]
+
+
 class Ranker:
     def __init__(self, registry: Registry) -> None:
         self.registry = registry
@@ -98,7 +118,24 @@ class Ranker:
                     + [" ".join(str(v) for v in ex.params.values()) for ex in op.examples]
                 )
                 docs.append(tokens(text))
-        self._bm25 = BM25Okapi(docs) if docs else None
+        self._bm25 = Lexical(docs)
+        self.recipe_refs = list(registry.recipes)
+        recipe_docs = [
+            tokens(" ".join([r.name, r.when] + [f"{n} {p.desc}" for n, p in r.params.items()]))
+            for r in registry.recipes.values()
+        ]
+        self._recipe_bm25 = Lexical(recipe_docs)
+
+    def rank_recipes(self, query: str, top: int = 3) -> list[str]:
+        """Recipes whose `when` matches the question, best first. The planner sees them before
+        primitives, because a recipe moves a known chain into tested code."""
+        scores = self._recipe_bm25.scores(tokens(query))
+        hits = sorted(
+            (i for i in range(len(self.recipe_refs)) if scores[i] > 0),
+            key=lambda i: scores[i],
+            reverse=True,
+        )
+        return [self.recipe_refs[i] for i in hits[:top]]
 
     def rank(
         self,
@@ -108,7 +145,7 @@ class Ranker:
         prefer: list[str] | None = None,
         top: int = 5,
     ) -> list[RankedTool]:
-        if self._bm25 is None:
+        if not self.refs:
             return []
         fused, matched = self._bm25_by_tool(self._bm25, query)
         pinned = self._exact(query) | set(scope or [])
@@ -149,11 +186,10 @@ class Ranker:
         return out
 
     def _bm25_by_tool(
-        self, bm25: BM25Okapi, query: str
+        self, bm25: "Lexical", query: str
     ) -> tuple[dict[str, float], dict[str, list[str]]]:
         """RRF score per tool from its best-ranked op, and the ops that matched at all."""
-        q = tokens(query)
-        scores = bm25.get_scores(q) if q else [0.0] * len(self.refs)
+        scores = bm25.scores(tokens(query))
         order = sorted(range(len(self.refs)), key=lambda i: scores[i], reverse=True)
         fused: dict[str, float] = {}
         matched: dict[str, list[str]] = {}

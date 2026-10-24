@@ -1,6 +1,6 @@
 """Planner agent: question + ranked shortlist -> validated Plan (PydanticAI, model from config)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -11,7 +11,8 @@ from pydantic_ai.models import Model
 from oracle.plan.models import Plan, plan_errors
 from oracle.rank.index import RankedTool
 from oracle.registry.loader import Registry
-from oracle.registry.schema import Op, Param, Tool
+from oracle.registry.schema import Op, Param, Recipe, Tool
+from oracle.timewin import TimeWindow
 
 # The oracle owns its stdout (the main agent reads it), so pydantic-ai's first-run banner is off
 # for every agent, whichever command builds it.
@@ -19,6 +20,34 @@ pydantic_ai.BANNER_ENABLED = False
 
 PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 PLAN_RETRIES = 2
+
+
+@dataclass
+class Shortlist:
+    tools: list[RankedTool]
+    recipes: list[str] = field(default_factory=list)
+
+    @property
+    def allowed(self) -> set[str]:
+        return {ref for t in self.tools for ref in t.ops} | set(self.recipes)
+
+
+@dataclass
+class Usage:
+    tokens_in: int = 0
+    tokens_out: int = 0
+    model_calls: int = 0
+
+    def add(self, run_usage: object) -> None:
+        """Add a PydanticAI RunUsage."""
+        self.tokens_in += getattr(run_usage, "input_tokens", 0) or 0
+        self.tokens_out += getattr(run_usage, "output_tokens", 0) or 0
+        self.model_calls += getattr(run_usage, "requests", 0) or 0
+
+    def merge(self, other: "Usage") -> None:
+        self.tokens_in += other.tokens_in
+        self.tokens_out += other.tokens_out
+        self.model_calls += other.model_calls
 
 
 @dataclass
@@ -31,9 +60,11 @@ class PlanContext:
 @dataclass
 class PlanOutcome:
     plan: Plan
-    tokens_in: int
-    tokens_out: int
-    model_calls: int
+    usage: Usage
+
+
+def prompt(name: str) -> str:
+    return (PROMPTS / f"{name}.md").read_text()
 
 
 def build_planner(model: Model | str) -> Agent[PlanContext, Plan]:
@@ -41,7 +72,7 @@ def build_planner(model: Model | str) -> Agent[PlanContext, Plan]:
         model,
         deps_type=PlanContext,
         output_type=Plan,
-        instructions=(PROMPTS / "planner.md").read_text(),
+        instructions=prompt("planner"),
         retries=PLAN_RETRIES,
     )
 
@@ -60,43 +91,56 @@ async def make_plan(
     *,
     question: str,
     intent: str | None,
-    shortlist: list[RankedTool],
+    shortlist: Shortlist,
     registry: Registry,
     max_steps: int,
     now: datetime,
+    window: TimeWindow | None = None,
 ) -> PlanOutcome:
-    allowed = {ref for t in shortlist for ref in t.ops}
-    prompt = render_request(question, intent, shortlist, registry, max_steps, now)
-    result = await agent.run(prompt, deps=PlanContext(registry, allowed, max_steps))
-    usage = result.usage
-    return PlanOutcome(
-        plan=result.output,
-        tokens_in=usage.input_tokens,
-        tokens_out=usage.output_tokens,
-        model_calls=usage.requests,
-    )
+    text = render_request(question, intent, shortlist, registry, max_steps, now, window)
+    result = await agent.run(text, deps=PlanContext(registry, shortlist.allowed, max_steps))
+    usage = Usage()
+    usage.add(result.usage)
+    return PlanOutcome(plan=result.output, usage=usage)
 
 
 def render_request(
     question: str,
     intent: str | None,
-    shortlist: list[RankedTool],
+    shortlist: Shortlist,
     registry: Registry,
     max_steps: int,
     now: datetime,
+    window: TimeWindow | None = None,
 ) -> str:
     lines = [f"Question: {question}"]
     if intent:
         lines.append(f"Why they are asking: {intent}")
-    lines += [
-        f"Current time: {now.isoformat(timespec='minutes')} ({now.tzname()})",
-        f"Step limit: {max_steps}",
-        "",
-        "Shortlist:",
-    ]
-    for ranked in shortlist:
-        lines += render_tool(registry.tools[ranked.tool])
+    lines.append(f"Current time: {now.isoformat(timespec='minutes')} ({now.tzname()})")
+    if window:
+        lines.append(f"Time window in the question: {window.describe()}")
+    lines += [f"Step limit: {max_steps}", ""]
+    lines += render_shortlist(shortlist, registry)
     return "\n".join(lines)
+
+
+def render_shortlist(shortlist: Shortlist, registry: Registry) -> list[str]:
+    lines: list[str] = []
+    if shortlist.recipes:
+        lines += ["Recipes (tested chains; prefer one when its `when` fits the question):"]
+        for name in shortlist.recipes:
+            lines += render_recipe(registry.recipes[name])
+        lines.append("")
+    lines.append("Tools:")
+    for ranked in shortlist.tools:
+        lines += render_tool(registry.tools[ranked.tool])
+    return lines
+
+
+def render_recipe(recipe: Recipe) -> list[str]:
+    lines = [f"- {recipe.name}: {recipe.when}"]
+    lines += [f"    {name}: {describe(p)}" for name, p in recipe.params.items()]
+    return lines
 
 
 def render_tool(tool: Tool) -> list[str]:

@@ -7,11 +7,12 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from typer.testing import CliRunner
 
 from oracle import cli
-from oracle.ask import AskRequest, ask
+from oracle.ask import AskRequest, Models, ask
 from oracle.config import Config
 from oracle.log.store import open_store
 from oracle.registry.loader import Registry
 from oracle.render import to_json, to_markdown
+from tests.conftest import DONE, echo_distiller, scripted
 
 
 def planner_choosing(op: str, **params: Any) -> FunctionModel:
@@ -25,7 +26,7 @@ def planner_choosing(op: str, **params: Any) -> FunctionModel:
 async def test_quick_ask_end_to_end(home_cfg: Config, fake_registry: Registry) -> None:
     model = planner_choosing("acli.jira.search", jql="assignee = currentUser() AND updated >= -1d")
     req = AskRequest("what am I working on today", level="quick", session="conv-1")
-    answer = await ask(req, home_cfg, fake_registry, planner_model=model)
+    answer = await ask(req, home_cfg, fake_registry, model)
 
     assert answer.searched == ["acli"] and answer.not_searched == ["workiq"]
     assert answer.unavailable == ["code-graph", "code-search"]
@@ -41,13 +42,16 @@ async def test_quick_ask_end_to_end(home_cfg: Config, fake_registry: Registry) -
     assert hit is not None and hit.op == "acli.jira.search"
 
 
-async def test_standard_level_runs_quick_and_says_so(
-    home_cfg: Config, fake_registry: Registry
-) -> None:
-    model = planner_choosing("workiq.people.lookup", name="andrew neville")
-    answer = await ask(AskRequest("who is andrew neville"), home_cfg, fake_registry, model)
+async def test_deep_runs_as_standard_and_says_so(home_cfg: Config, fake_registry: Registry) -> None:
+    models = Models(
+        planner=planner_choosing("workiq.people.lookup", name="andrew neville"),
+        checker=scripted(DONE),
+        distiller=echo_distiller(),
+    )
+    req = AskRequest("who is andrew neville", level="deep")
+    answer = await ask(req, home_cfg, fake_registry, models)
     assert any("not built yet" in n for n in answer.notes)
-    assert answer.findings[0].text.startswith("Andrew Neville")
+    assert answer.findings[0].pointer == "people:u-1001"
     async with (
         open_store(home_cfg.log_path) as store,
         store.db.execute(
@@ -55,7 +59,7 @@ async def test_standard_level_runs_quick_and_says_so(
         ) as cur,
     ):
         row = await cur.fetchone()
-    assert row is not None and (row[0], row[1]) == ("standard", "quick")
+    assert row is not None and (row[0], row[1]) == ("deep", "standard")
     assert "not built yet" not in row[2]
 
 

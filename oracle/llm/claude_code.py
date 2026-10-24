@@ -7,6 +7,7 @@ back as a call to that output tool, so PydanticAI validates it and retries as us
 The oracle's agents never call function tools, so none are forwarded.
 """
 
+import asyncio
 import json
 from typing import Any
 
@@ -26,6 +27,8 @@ from pydantic_ai.usage import RequestUsage
 
 PREFIX = "claude-code:"
 MAX_TURNS = 3  # one answer plus the CLI's structured-output turn, with slack
+CALL_TIMEOUT_S = 120.0  # a hung `claude` process must not hang the main agent's Bash call
+NO_THINKING = {"haiku"}
 RETRY = "Your previous answer was rejected. Fix it and answer again:\n"
 
 
@@ -49,9 +52,16 @@ async def _complete(alias: str, messages: list[ModelMessage], info: AgentInfo) -
         ) from None
     output = info.output_tools[0] if info.output_tools else None
     result: Any = None
-    async for msg in query(prompt=transcript(messages), options=_options(alias, info, output)):
-        if isinstance(msg, ResultMessage):
-            result = msg
+    try:
+        async with asyncio.timeout(CALL_TIMEOUT_S):
+            stream = query(prompt=transcript(messages), options=_options(alias, info, output))
+            async for msg in stream:
+                if isinstance(msg, ResultMessage):
+                    result = msg
+    except TimeoutError:
+        raise ClaudeCodeError(
+            f"claude-code {alias} gave no result in {CALL_TIMEOUT_S:g} s"
+        ) from None
     if result is None or result.is_error:
         detail = getattr(result, "result", None) or "no result message"
         raise ClaudeCodeError(f"claude-code {alias} failed: {detail}")
@@ -68,7 +78,7 @@ def _part(result: Any, output: ToolDefinition | None) -> TextPart | ToolCallPart
 
 
 def _options(alias: str, info: AgentInfo, output: ToolDefinition | None) -> Any:
-    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk import ClaudeAgentOptions, ThinkingConfigDisabled
 
     return ClaudeAgentOptions(
         model=alias,
@@ -81,6 +91,8 @@ def _options(alias: str, info: AgentInfo, output: ToolDefinition | None) -> Any:
         output_format=(
             {"type": "json_schema", "schema": output.parameters_json_schema} if output else None
         ),
+        # Haiku only extracts and formats here; thinking adds latency without better output.
+        thinking=ThinkingConfigDisabled(type="disabled") if alias in NO_THINKING else None,
     )
 
 

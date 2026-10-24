@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from oracle.exec.redact import redact_text
 from oracle.registry.schema import PLACEHOLDER, Returns
 
 
@@ -45,6 +46,7 @@ def expand_spill(pointer: str, spill_dir: Path) -> dict[str, Any]:
         raise SpillError(f"{pointer} is not a spill file under {spill_dir}")
     raw = path.read_bytes()
     head = raw[: SPILL_HEAD_CHARS * 4].decode("utf-8", "replace")[:SPILL_HEAD_CHARS]
+    head = redact_text(head)  # spill files hold raw stdout; records were redacted, this was not
     return {
         "pointer": pointer,
         "path": str(path),
