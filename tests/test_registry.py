@@ -70,8 +70,9 @@ def test_mutating_tool_refused_and_mutating_op_dropped(tmp_path: Path) -> None:
     reg = load_registry(tmp_path)
     assert "writer" not in reg.tools
     assert [op.name for op in reg.tools["mixed"].ops] == ["search"]
-    assert any("refused" in p for p in reg.problems)
-    assert any("dropped mutating" in p for p in reg.problems)
+    assert reg.problems == []  # refusing writes is the design, not a broken manifest
+    assert any("refused" in n for n in reg.notes)
+    assert any("dropped mutating" in n for n in reg.notes)
 
 
 def test_bad_manifest_does_not_block_others(tmp_path: Path) -> None:
@@ -103,7 +104,7 @@ def test_validate_params_coerces_and_checks() -> None:
     reg = load_registry(REGISTRY)
     _, op = reg.resolve("code-graph.expand")
     out = validate_params(op, {"ids": "a, b", "limit": "7"})
-    assert out == {"ids": ["a", "b"], "direction": "callers", "limit": 7}
+    assert out == {"ids": ["a", "b"], "repo": None, "direction": "callers", "limit": 7}
     with pytest.raises(ParamError, match="one of"):
         validate_params(op, {"ids": ["a"], "direction": "sideways"})
     with pytest.raises(ParamError, match="at most"):
@@ -114,3 +115,39 @@ def test_validate_params_coerces_and_checks() -> None:
         validate_params(op, {"ids": ["a"], "depth": 2})
     with pytest.raises(ParamError, match="must be int"):
         validate_params(op, {"ids": ["a"], "limit": True})
+
+
+def test_unreadable_manifest_and_missing_dir_are_problems_not_crashes(tmp_path: Path) -> None:
+    write(tmp_path, tool_dict(name="good"))
+    (tmp_path / "latin.yaml").write_bytes("name: caf\xe9".encode("latin-1"))
+    (tmp_path / "dir.yaml").mkdir()
+    reg = load_registry(tmp_path)
+    assert list(reg.tools) == ["good"] and len(reg.problems) == 2
+    missing = load_registry(tmp_path / "nope")
+    assert missing.problems and "does not exist" in missing.problems[0]
+
+
+def test_bad_jsonpath_fails_at_load() -> None:
+    data = tool_dict()
+    data["ops"][0]["returns"] = {"path": "$..results"}
+    with pytest.raises(ValidationError, match="cannot parse"):
+        Tool.model_validate(data)
+
+
+def test_references_inactive_fine_unadded_note_typo_problem(tmp_path: Path) -> None:
+    a = tool_dict(name="a")
+    a["ops"][0]["chains_to"] = ["b.search", "later.op"]
+    write(tmp_path, a)
+    write(tmp_path, tool_dict(name="b"))
+    reg = load_registry(tmp_path, {"a"})
+    assert reg.problems == []
+    assert reg.notes == ["a.search: references tools not registered yet ['later.op']"]
+    a["ops"][0]["chains_to"] = ["b.nope"]
+    write(tmp_path, a)
+    typo = load_registry(tmp_path)
+    assert typo.problems == ["a.search: references ops that do not exist ['b.nope']"]
+
+
+def test_explicit_null_takes_the_default() -> None:
+    _, op = load_registry(REGISTRY).resolve("acli.jira.search")
+    assert validate_params(op, {"jql": "x", "limit": None})["limit"] == 20

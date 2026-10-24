@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS calls (
   call_id TEXT PRIMARY KEY, session TEXT, ts REAL, query TEXT, intent TEXT, level TEXT,
   breadth INTEGER, ranked_tools TEXT, plan TEXT, replans INTEGER, escalated INTEGER,
   wall_ms INTEGER, tokens_in INTEGER, tokens_out INTEGER, model_calls INTEGER,
-  confidence TEXT, gaps TEXT
+  confidence TEXT, gaps TEXT, ran_level TEXT
 );
 CREATE TABLE IF NOT EXISTS ops (
   call_id TEXT, step_id TEXT, op TEXT, params TEXT, ok INTEGER, error TEXT,
@@ -47,6 +47,7 @@ class CallRecord:
     query: str
     intent: str | None
     level: str
+    """As requested by the caller."""
     ranked_tools: list[dict[str, Any]]
     plan: dict[str, Any] | None
     wall_ms: int
@@ -56,6 +57,8 @@ class CallRecord:
     breadth: bool = False
     confidence: str | None = None
     gaps: list[str] = field(default_factory=list)
+    ran_level: str | None = None
+    """The level that actually ran (M1 runs every call as quick)."""
 
 
 @dataclass
@@ -72,11 +75,14 @@ class Store:
 
     async def record_call(self, c: CallRecord) -> None:
         await self.db.execute(
-            "INSERT INTO calls VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO calls (call_id, session, ts, query, intent, level, breadth, ranked_tools,"
+            " plan, replans, escalated, wall_ms, tokens_in, tokens_out, model_calls, confidence,"
+            " gaps, ran_level) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 c.call_id, c.session, time.time(), c.query, c.intent, c.level, int(c.breadth),
                 json.dumps(c.ranked_tools), json.dumps(c.plan), 0, 0, c.wall_ms,
                 c.tokens_in, c.tokens_out, c.model_calls, c.confidence, json.dumps(c.gaps),
+                c.ran_level or c.level,
             ),
         )  # fmt: skip
         await self.db.commit()
@@ -127,4 +133,14 @@ async def open_store(path: Path) -> AsyncIterator[Store]:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=5000")
         await db.executescript(SCHEMA)
+        await _migrate(db)
         yield Store(db)
+
+
+async def _migrate(db: aiosqlite.Connection) -> None:
+    """Add columns that logs created by an earlier version lack."""
+    async with db.execute("PRAGMA table_info(calls)") as cur:
+        columns = {row[1] for row in await cur.fetchall()}
+    if "ran_level" not in columns:
+        await db.execute("ALTER TABLE calls ADD COLUMN ran_level TEXT")
+        await db.commit()

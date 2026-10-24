@@ -48,6 +48,15 @@ async def test_standard_level_runs_quick_and_says_so(
     answer = await ask(AskRequest("who is andrew neville"), home_cfg, fake_registry, model)
     assert any("not built yet" in n for n in answer.notes)
     assert answer.findings[0].text.startswith("Andrew Neville")
+    async with (
+        open_store(home_cfg.log_path) as store,
+        store.db.execute(
+            "SELECT level, ran_level, gaps FROM calls WHERE call_id = ?", (answer.call_id,)
+        ) as cur,
+    ):
+        row = await cur.fetchone()
+    assert row is not None and (row[0], row[1]) == ("standard", "quick")
+    assert "not built yet" not in row[2]
 
 
 async def test_failed_op_is_reported_in_coverage(home_cfg: Config, fake_registry: Registry) -> None:
@@ -60,6 +69,8 @@ async def test_failed_op_is_reported_in_coverage(home_cfg: Config, fake_registry
 
 @pytest.fixture
 def runner_env(home_cfg: Config, monkeypatch: pytest.MonkeyPatch) -> CliRunner:
+    for var in ("ORACLE_REGISTRY", "ORACLE_TZ", "ORACLE_MODEL_PLANNER", "ORACLE_MODEL_EXTRACT"):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("ORACLE_HOME", str(home_cfg.home))
     monkeypatch.setenv("ORACLE_PROFILE", "home")
     return CliRunner()
@@ -73,10 +84,17 @@ def test_cli_tool_list_and_test_on_fakes(runner_env: CliRunner) -> None:
     assert "8/8 examples passed" in tested.output
 
 
-def test_cli_ask_without_model_is_a_clear_error(
+def test_cli_tool_test_refuses_unknown_names(
     runner_env: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("ORACLE_MODEL_PLANNER", raising=False)
+    result = runner_env.invoke(cli.app, ["tool", "test", "acl"])
+    assert result.exit_code == 2 and "unknown tools ['acl']" in result.output
+    monkeypatch.setenv("ORACLE_REGISTRY", "/nope")
+    missing = runner_env.invoke(cli.app, ["tool", "test", "acli"])
+    assert missing.exit_code == 2 and "does not exist" in missing.output
+
+
+def test_cli_ask_without_model_is_a_clear_error(runner_env: CliRunner) -> None:
     result = runner_env.invoke(cli.app, ["ask", "who is andrew neville"])
     assert result.exit_code == 2
     assert "ORACLE_MODEL_PLANNER" in result.output

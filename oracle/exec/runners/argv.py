@@ -21,6 +21,15 @@ class ArgvError(ValueError):
     pass
 
 
+class LeadingDashError(ArgvError):
+    def __init__(self, name: str, value: str) -> None:
+        super().__init__(
+            f"param {name!r} value {value!r} starts with '-' and would be read as a flag; "
+            "the manifest should use '--' before positionals or the --flag=value form"
+        )
+        self.name, self.value = name, value
+
+
 def render(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -66,10 +75,7 @@ def _conditional(body: str, params: dict[str, Any], positional_ok: bool) -> list
 
 def _standalone(value: str, name: str, positional_ok: bool) -> str:
     if value.startswith("-") and not positional_ok:
-        raise ArgvError(
-            f"param {name!r} value {value!r} starts with '-' and would be read as a flag; "
-            "the manifest should use '--' before positionals or the --flag=value form"
-        )
+        raise LeadingDashError(name, value)
     return value
 
 

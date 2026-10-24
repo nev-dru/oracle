@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -52,44 +53,165 @@ def matches(query: str, *fields: object) -> bool:
 
 
 def since(value: str | None) -> datetime | None:
-    """`today`, `startOfDay()`, `-1d`, `24h`, `-3h` or an ISO timestamp."""
+    """`today`, `startOfDay()`, `startOfWeek()`, `-1d`, `24h`, `-2w` or an ISO timestamp.
+
+    Raises ValueError on anything else.
+    """
     if not value:
         return None
     v = value.strip().strip("\"'")
+    midnight = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
     if v in ("today", "startOfDay()"):
-        return NOW.replace(hour=0, minute=0, second=0, microsecond=0)
-    m = re.fullmatch(r"-?(\d+)([dh])", v)
+        return midnight
+    if v == "startOfWeek()":
+        return midnight - timedelta(days=midnight.weekday())
+    m = re.fullmatch(r"-?(\d+)([whd])", v)
     if m:
-        n = int(m.group(1))
-        return NOW - (timedelta(days=n) if m.group(2) == "d" else timedelta(hours=n))
-    try:
-        stamp = datetime.fromisoformat(v)
-    except ValueError:
-        fail(f"cannot parse time {value!r}")
-        raise
+        unit = {"w": "weeks", "d": "days", "h": "hours"}[m.group(2)]
+        return NOW - timedelta(**{unit: int(m.group(1))})
+    stamp = datetime.fromisoformat(v)
     return stamp if stamp.tzinfo else stamp.astimezone()
+
+
+def since_arg(value: str | None) -> datetime | None:
+    """`since()` for a CLI flag: a bad value is a usage error."""
+    try:
+        return since(value)
+    except ValueError:
+        fail(f"cannot parse time {value!r}", code=2)
+        raise
 
 
 def after(stamp: str, start: datetime | None) -> bool:
     return start is None or datetime.fromisoformat(stamp) >= start
 
 
-CLAUSE = re.compile(r"""^\s*(\w+)\s*(~|=|>=|<=|!=)\s*("[^"]*"|'[^']*'|\S+)\s*$""")
+CLAUSE = re.compile(
+    r"""^\s*(\w+)\s*(?:(!~|~|!=|>=|<=|=|>|<)|\s(not\s+in|in)\b)\s*(.+?)\s*$""", re.IGNORECASE
+)
+Match = Callable[[dict, str, str, str], "bool | None"]
 
 
-def clauses(query: str) -> list[tuple[str, str, str]]:
-    """Split a JQL/CQL string on AND; drop ORDER BY. Unparseable clauses warn and are ignored."""
-    body = re.split(r"\border\s+by\b", query, flags=re.I)[0]
-    out = []
-    for part in re.split(r"\band\b", body, flags=re.I):
-        if not part.strip():
+class Unsupported(Exception):
+    pass
+
+
+def compile_query(query: str, match: Match, supported: str) -> Callable[[dict], bool]:
+    """A strict JQL/CQL subset: AND, OR, parentheses, ORDER BY dropped.
+
+    `match(row, field, op, value)` returns None for a clause it cannot evaluate. Any such clause
+    makes the fake exit 2, so a plan the fake cannot check is an op error, never a false pass.
+    """
+    body = _split_top(query, r"order\s+by")[0] if query.strip() else ""
+    try:
+        keep = _compile(body, match)
+    except Unsupported as exc:
+        fail(f"unsupported clause {exc} (this fake supports {supported})", code=2)
+        raise
+
+    def checked(row: dict) -> bool:
+        try:
+            return keep(row)
+        except Unsupported as exc:
+            fail(f"unsupported clause {exc} (this fake supports {supported})", code=2)
+            raise
+
+    return checked
+
+
+def _compile(expr: str, match: Match) -> Callable[[dict], bool]:
+    expr = _strip_parens(expr)
+    ors = _split_top(expr, "or")
+    if len(ors) > 1:
+        parts = [_compile(e, match) for e in ors]
+        return lambda row: any(p(row) for p in parts)
+    ands = _split_top(expr, "and")
+    if len(ands) > 1:
+        parts = [_compile(e, match) for e in ands]
+        return lambda row: all(p(row) for p in parts)
+    m = CLAUSE.match(expr)
+    if not m:
+        raise Unsupported(repr(expr))
+    field = m.group(1).lower()
+    op = " ".join((m.group(2) or m.group(3)).lower().split())
+    value = m.group(4)
+
+    def clause(row: dict) -> bool:
+        hit = match(row, field, op, value)
+        if hit is None:
+            raise Unsupported(repr(expr))
+        return hit
+
+    return clause
+
+
+def _strip_parens(expr: str) -> str:
+    while expr.startswith("(") and expr.endswith(")") and _depth_ok(expr[1:-1]):
+        expr = expr[1:-1].strip()
+    return expr
+
+
+def _depth_ok(expr: str) -> bool:
+    depth = 0
+    for c in expr:
+        depth += {"(": 1, ")": -1}.get(c, 0)
+        if depth < 0:
+            return False
+    return depth == 0
+
+
+def _split_top(expr: str, word: str) -> list[str]:
+    """Split on a keyword outside parentheses and quotes."""
+    parts, depth, quote, start, i = [], 0, "", 0, 0
+    pattern = re.compile(rf"\s+{word}\s+", re.I)
+    while i < len(expr):
+        c = expr[i]
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "\"'":
+            quote = c
+        elif c in "()":
+            depth += 1 if c == "(" else -1
+        elif depth == 0 and (m := pattern.match(expr, i)):
+            parts.append(expr[start:i])
+            start = i = m.end()
             continue
-        m = CLAUSE.match(part)
-        if not m:
-            sys.stderr.write(f"warning: unsupported clause ignored: {part.strip()}\n")
-            continue
-        out.append((m.group(1).lower(), m.group(2), m.group(3).strip("\"'")))
-    return out
+        i += 1
+    parts.append(expr[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+def unquote(value: str) -> str:
+    return value.strip().strip("\"'")
+
+
+def listed(value: str) -> list[str]:
+    """`("To Do", Done)` -> ["to do", "done"]"""
+    return [unquote(v).lower() for v in value.strip().strip("()").split(",") if v.strip()]
+
+
+def compare(op: str, left: str, right: str) -> bool | None:
+    """Equality and IN for strings; anything else is unsupported for this field."""
+    left = left.lower()
+    if op == "=":
+        return left == unquote(right).lower()
+    if op == "!=":
+        return left != unquote(right).lower()
+    if op in ("in", "not in"):
+        return (left in listed(right)) == (op == "in")
+    return None
+
+
+def compare_time(op: str, stamp: str, value: str) -> bool | None:
+    try:
+        start = since(unquote(value))
+    except ValueError:
+        return None
+    if start is None:
+        return None
+    when = datetime.fromisoformat(stamp)
+    ops = {">=": when >= start, ">": when > start, "<=": when <= start, "<": when < start}
+    return ops.get(op)
 
 
 def page(rows: list[dict], start: int, limit: int) -> tuple[list[dict], int | None]:

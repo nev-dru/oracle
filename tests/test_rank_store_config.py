@@ -23,10 +23,16 @@ def ranker() -> Ranker:
         ("get ticket PLAT-412", "acli"),
         ("design doc for the gateway", "acli"),
         ("callers of transfer_ownership", "code-graph"),
+        ("callers of x", "code-graph"),
+        ("who calls transfer_ownership", "code-graph"),
     ],
 )
 def test_top_tool_for_seed_shapes(ranker: Ranker, query: str, expected: str) -> None:
     assert ranker.rank(query)[0].tool == expected
+
+
+def test_unknown_person_still_reaches_people_source(ranker: Ranker) -> None:
+    assert ranker.rank("who is jane smith")[0].tool == "workiq"
 
 
 def test_code_question_shortlists_both_code_tools(ranker: Ranker) -> None:
@@ -36,7 +42,7 @@ def test_code_question_shortlists_both_code_tools(ranker: Ranker) -> None:
 
 def test_shortlist_is_padded_and_grouped(ranker: Ranker) -> None:
     ranked = ranker.rank("how salesforce talks to cloud")
-    assert len(ranked) >= 3
+    assert len(ranked) == 4  # every tool fits under top=5, matched or not
     graph = next(t for t in ranked if t.tool == "code-graph")
     assert "code-graph.path_between" in graph.ops and len(graph.ops) == 5
 
@@ -48,7 +54,8 @@ def test_scope_restricts_and_exact_name_pins(ranker: Ranker) -> None:
 
 
 def test_tokens_drop_stopwords_and_fold_plurals() -> None:
-    assert tokens("Who are the owners of tickets?") == ["owner", "ticket"]
+    assert tokens("Who are the owners of tickets?") == ["who", "owner", "ticket"]
+    assert tokens("when is my meeting") == ["meeting"]
 
 
 async def test_store_round_trip_and_session_scoping(tmp_path: Path) -> None:

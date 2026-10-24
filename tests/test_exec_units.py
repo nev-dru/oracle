@@ -1,9 +1,9 @@
 import pytest
 
-from oracle.exec import jsonpath
 from oracle.exec.parse import ParseError, parse_output
 from oracle.exec.pointers import pointer_for
 from oracle.exec.runners.argv import ArgvError, build_argv
+from oracle.registry import jsonpath
 from oracle.registry.schema import Returns
 
 
@@ -74,3 +74,7 @@ def test_summary_drops_values_the_pointer_already_carries() -> None:
     record = {"title": "transfer_ownership", "path": "/r/a.py", "start_line": 11, "kind": "fn"}
     fields = ["title", "path", "start_line", "kind"]
     assert summarise(record, fields, "code:/r/a.py:11") == "transfer_ownership · fn"
+    hop = {"hop": 1, "name": "publish", "path": "/r/bus.py", "line": 12}
+    assert summarise(hop, ["hop", "name", "path", "line"], "code:/r/bus.py:12") == "1 · publish"
+    msg = {"id": "19:msg-1", "text": "hi"}
+    assert summarise(msg, ["id", "text"], "teams:19:msg-1") == "hi"

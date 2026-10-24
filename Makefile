@@ -9,15 +9,15 @@ build:
 	uv build -q
 
 lint:
-	uv run ruff check $(PY)
-	uv run ruff format --check $(PY)
-	uv run pyright
-	uv run xenon --max-absolute B --max-modules B --max-average A oracle
-	uv run radon mi -s --min B oracle | (! grep -E " - [CDEF] ")
-	uv run vulture oracle vulture_allowlist.py --min-confidence 80
+	uv run --all-extras ruff check $(PY)
+	uv run --all-extras ruff format --check $(PY)
+	uv run --all-extras pyright
+	uv run --all-extras xenon --max-absolute B --max-modules B --max-average A oracle
+	uv run --all-extras radon mi -s --min B oracle | (! grep -E " - [CDEF] ")
+	uv run --all-extras vulture oracle vulture_allowlist.py --min-confidence 80
 
 test:
-	uv run pytest -q
+	uv run --all-extras pytest -q
 
 # Index the fixture repo into a repo-local vex db and into codebase-memory (needs Ollama for embeddings).
 fixtures:

@@ -25,18 +25,19 @@ ops:
   - name: expand
     when: "Callers or callees of a list of symbol ids from find_symbol or symbols_at."
     params:
-      ids: {type: "list[str]", required: true, desc: "symbol ids (qualified names)"}
+      ids: {type: "list[str]", required: true, desc: "symbol ids from find_symbol or symbols_at, or plain symbol names"}
+      repo: {type: str, enum_from: code-graph.list_repos, desc: "where to resolve plain names; omit for all"}
       direction: {type: str, enum: [callers, callees], default: callers}
       limit: {type: int, default: 50, max: 200}
-    argv: ["cmm-graph", "expand", "--ids", "{ids}", "--direction", "{direction}", "--limit", "{limit}"]
+    argv: ["cmm-graph", "expand", "--ids", "{ids}", "{?repo:--repo,repo}", "--direction", "{direction}", "--limit", "{limit}"]
     returns:
       format: json
       path: "$.results[*]"
       id_field: symbol_id
-      summary_fields: [name, path, line, direction, of]
+      summary_fields: [name, path, line, direction, of_name]
       pointer: "code:{path}:{line}"
     examples:
-      - params: {ids: ["Users-andrewneville-dev-oracle-tests-fakes-acme.accounts.ownership.transfer_ownership"], direction: callers}
+      - params: {ids: [transfer_ownership], repo: acme, direction: callers}
         expect: {min_results: 2, has_fields: [symbol_id, of]}
   - name: symbols_at
     when: "Map path:line locations (e.g. code-search hits) to their enclosing symbols, to expand them."

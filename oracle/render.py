@@ -54,8 +54,15 @@ def summarise(record: dict[str, Any], fields: list[str], pointer: str = "") -> s
     main-context tokens are the expensive ones."""
     keys = fields or list(record)[:4]
     values = [str(record[k]) for k in keys if record.get(k) not in (None, "", [])]
-    parts = [_clip(v) for v in values if v not in pointer]
+    parts = [_clip(v) for v in values if not _spelled_by(v, pointer)]
     return " · ".join(parts) if parts else _clip(json.dumps(record, default=str))
+
+
+def _spelled_by(value: str, pointer: str) -> bool:
+    """True when the pointer carries the value as a whole component: the path or line in
+    `code:/r/a.py:11`, or the id in `teams:19:msg-5501`. A substring is not enough: hop 1 is
+    not spelled by line 12."""
+    return value in pointer.split(":") or pointer.endswith(":" + value)
 
 
 def _clip(text: str) -> str:

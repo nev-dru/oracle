@@ -35,7 +35,9 @@ def cmm(tool: str, args: dict) -> dict:
 
 
 def projects() -> list[dict]:
-    return cmm("list_projects", {}).get("projects", [])
+    """Indexed projects whose source still exists; a moved or deleted checkout is skipped."""
+    found = cmm("list_projects", {}).get("projects", [])
+    return [p for p in found if os.path.isdir(p.get("root_path", ""))]
 
 
 def roots() -> dict[str, str]:
@@ -84,11 +86,31 @@ def node(row: list[str], root: str) -> dict:
     }
 
 
-def project_of(symbol_id: str, known: dict[str, str]) -> str:
+def project_of(symbol_id: str, known: dict[str, str]) -> str | None:
     for name in known:
         if symbol_id.startswith(name + "."):
             return name
-    raise SystemExit(f"no indexed repo owns symbol {symbol_id}")
+    return None
+
+
+def qualify(ids: list[str], repo: str | None, known: dict[str, str]) -> dict[str, list[str]]:
+    """Group ids by project. Plain names (`transfer_ownership`) are resolved in --repo, or in
+    every repo, so callers need not know machine-specific qualified names. A qualified id
+    (dotted) that no indexed repo owns is an error, not an empty result."""
+    by_project: dict[str, list[str]] = {}
+    names: list[str] = []
+    for i in ids:
+        owner = project_of(i, known)
+        if owner:
+            by_project.setdefault(owner, []).append(i)
+        elif "." in i:
+            raise SystemExit(f"no indexed repo owns symbol {i}")
+        else:
+            names.append(i)
+    if names:
+        for project in pick_projects(repo, known):
+            by_project.setdefault(project, []).extend(resolve_names(project, names))
+    return {p: group for p, group in by_project.items() if group}
 
 
 def pick_projects(repo: str | None, known: dict[str, str]) -> list[str]:
@@ -135,14 +157,19 @@ def neighbours(project: str, ids: list[str], direction: str, limit: int) -> list
 def cmd_expand(a: argparse.Namespace) -> dict:
     known = roots()
     ids = [i for i in a.ids.split(",") if i]
-    by_project: dict[str, list[str]] = {}
-    for i in ids:
-        by_project.setdefault(project_of(i, known), []).append(i)
     out: list[dict] = []
-    for project, group in by_project.items():
+    for project, group in qualify(ids, a.repo, known).items():
         for source, row in neighbours(project, group, a.direction, a.limit):
-            out.append({**node(row, known[project]), "of": source, "direction": a.direction})
+            hit = {**node(row, known[project]), "of": source, "direction": a.direction}
+            out.append({**hit, "of_name": source.rsplit(".", 1)[-1]})
     return {"results": out[: a.limit]}
+
+
+def resolve_names(project: str, names: list[str]) -> list[str]:
+    """Qualified ids for plain names, in one query per project."""
+    listed = "[" + ", ".join(quote(n) for n in names) + "]"
+    cypher = f"MATCH (m) WHERE m.name IN {listed} AND ({LABEL_FILTER}) RETURN m.qualified_name"
+    return [r[0] for r in query(project, cypher + " LIMIT 200")]
 
 
 def resolve(project: str, name: str) -> list[str]:
@@ -247,8 +274,9 @@ def parser() -> argparse.ArgumentParser:
     f.add_argument("--repo")
     f.add_argument("--limit", type=int, default=20)
     f.set_defaults(fn=cmd_find)
-    e = sub.add_parser("expand", help="callers or callees of symbol ids")
-    e.add_argument("--ids", required=True, help="comma-separated symbol ids")
+    e = sub.add_parser("expand", help="callers or callees of symbol ids or names")
+    e.add_argument("--ids", required=True, help="comma-separated symbol ids or plain names")
+    e.add_argument("--repo", help="where to resolve plain names; default every repo")
     e.add_argument("--direction", choices=["callers", "callees"], default="callers")
     e.add_argument("--limit", type=int, default=50)
     e.set_defaults(fn=cmd_expand)

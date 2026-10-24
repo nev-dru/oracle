@@ -16,7 +16,9 @@ def validate_params(op: Op, raw: dict[str, Any]) -> dict[str, Any]:
         raise ParamError(f"unknown params {unknown}; {op.name} takes {sorted(op.params)}")
     out: dict[str, Any] = {}
     for name, spec in op.params.items():
-        value = raw.get(name, spec.default)
+        value = raw.get(name)
+        if value is None:  # absent and explicit null both mean "use the default"
+            value = spec.default
         if value is None:
             if spec.required:
                 raise ParamError(f"missing required param {name!r}")

@@ -51,7 +51,8 @@ async def _run_one(executor: Executor, ref: str, index: int, example: Example) -
 
 def check(result: OpResult, example: Example) -> tuple[bool, str]:
     if not result.ok:
-        return False, f"{result.status}: {result.error}"
+        argv = f" [argv: {' '.join(result.argv)}]" if result.argv else ""
+        return False, f"{result.status}: {result.error}{argv}"
     n = len(result.records)
     if n < example.expect.min_results:
         return False, f"{n} results, expected at least {example.expect.min_results}"

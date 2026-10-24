@@ -7,7 +7,9 @@ Unknown fields are rejected so a typo in a manifest fails loudly instead of bein
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from oracle.registry import jsonpath
 
 NAME = r"^[a-z][a-z0-9-]*$"
 OP_NAME = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$"
@@ -30,10 +32,17 @@ class Param(Strict):
     max: int | None = None
 
 
+def _valid_path(path: str) -> str:
+    jsonpath.parse(path)  # raises PathError (a ValueError) on anything outside the subset
+    return path
+
+
 class Paginate(Strict):
     param: str
     next: str
     max_pages: int = Field(default=5, ge=1, le=50)
+
+    _next_ok = field_validator("next")(_valid_path)
 
 
 class Returns(Strict):
@@ -42,6 +51,8 @@ class Returns(Strict):
     id_field: str | None = None
     summary_fields: list[str] = Field(default_factory=list)
     pointer: str | None = None
+
+    _path_ok = field_validator("path")(_valid_path)
 
 
 class Expect(Strict):

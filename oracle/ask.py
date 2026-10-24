@@ -151,8 +151,11 @@ async def _log(
                 session=answer.session,
                 query=call.req.question,
                 intent=call.req.intent,
-                level=answer.level,
-                ranked_tools=[{"tool": t.tool, "score": t.score} for t in shortlist],
+                level=call.req.level,  # as requested; the trace notes when it ran as quick
+                ranked_tools=[
+                    {"tool": t.tool, "score": t.score, "pinned": t.pinned, "matched": t.matched_ops}
+                    for t in shortlist
+                ],
                 plan=outcome.plan.model_dump() if outcome else None,
                 wall_ms=wall_ms,
                 tokens_in=outcome.tokens_in if outcome else 0,
@@ -160,6 +163,7 @@ async def _log(
                 model_calls=outcome.model_calls if outcome else 0,
                 confidence=answer.confidence,
                 gaps=answer.gaps + answer.failures,
+                ran_level=answer.level,
             )
         )
         steps = outcome.plan.steps if outcome else []

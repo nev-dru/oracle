@@ -69,10 +69,11 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     data = _read_toml(home / "config.toml")
     profile_name = _pick("ORACLE_PROFILE", "profile", env, data)
     profile = load_profile(profile_name, home) if profile_name else None
+    from_file = data.get("registry")
     registry = (
         env.get("ORACLE_REGISTRY")
         or (profile.registry if profile else None)
-        or data.get("registry")
+        or (home / Path(from_file).expanduser() if from_file else None)  # relative to ORACLE_HOME
         or REPO_ROOT / "registry" / "tools"
     )
     return Config(

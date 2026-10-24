@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from oracle.exec import jsonpath
+from oracle.registry import jsonpath
 from oracle.registry.schema import Returns
 
 TEXT_RECORD_CHARS = 8000

@@ -30,7 +30,7 @@ Each decision names the alternative it rejects and the evidence behind it.
 | **Completeness pass** after execution | Return first results | Self-reflection was one of two components that mattered in AnyTool's ablations. Accuracy is priority 1. |
 | Rank **ops** grouped by tool, hybrid: exact name → BM25 → embeddings; replans condition on prior results | Rank tools only, semantic only, query only | Hybrid beats pure semantic because tool docs contain exact terms; conditioned retrieval beats query-only on multi-step benchmarks; hierarchical tool→op routing is what MCP-Zero and AnyTool converged on. |
 | Sonnet plans; Haiku only extracts and formats | Haiku everywhere for cost | Anthropic's own tool search does not support Haiku. Planning is where accuracy is decided. |
-| Deep tier writes a script against the generated library | Deep tier as a longer step loop | Code execution measured \~77% token and \~70% cost reduction at equal success; chains and filtering are native in code; data stays out of every model. |
+| Deep tier is a hop-based crawl by default, and writes a script against the generated library when the chain needs code logic | Deep tier as a longer step loop; a recursive `oracle` call per extracted term | Code execution measured \~77% token and \~70% cost reduction at equal success, and chains and filtering are native in code. A crawl must read results to find terms of unknown kinds, which a script written up front cannot do; batching a whole hop keeps model calls per hop constant however many terms it has. |
 | Read-only, enforced at the manifest level | Allow mutating ops behind a flag | Read-only sub-agents are the one multi-agent pattern both Anthropic and Cognition endorse. |
 | PydanticAI, model via config string | Claude Agent SDK | Work environment is Bedrock through LiteLLM; the oracle is a small typed agent, not a coding agent; structured output validation is the core need. |
 | Python, asyncio | Go | The workload is I/O-bound shell and HTTP calls; the GIL is irrelevant. Revisit only if a real sandbox or thousand-way fan-out appears. |
@@ -67,13 +67,15 @@ The main agent sees one command. Its description in CLAUDE.md or the skill is a 
 oracle "<question>" [--intent "<why you are asking>"] [--level quick|standard|deep]
        [--scope <tool[,tool]>] [--prefer <tool>] [--breadth] [--raw <pointer>]
        [--format md|json] [--session <id>]
+       [--depth <hops>] [--budget <tokens>|unlimited]   # deep crawl only
 oracle expand <pointer>        # fetch the full record behind a pointer
 oracle feedback <call_id> --useful yes|no [--note "..."]
 oracle tool add|test|list      # registry management
 ```
 
 - `--intent` is optional but changes results: "where ownership transfer happens, I'm tracing a bug" ranks differently from the bare question.
-- `--level` defaults to `standard`. `quick` is one op, no completeness pass. `deep` enables the script runner and Opus.
+- `--level` defaults to `standard`. `quick` is one op, no completeness pass. `deep` enables the crawl (default for discovery questions) and the script runner.
+- `--depth` and `--budget` bound a deep crawl: hops (default 3) and model tokens (default `ORACLE_DEEP_BUDGET`; `unlimited` leaves depth as the only limit).
 - `--breadth` forces fan-out across every applicable tool; the planner also turns it on by itself for discovery-shaped questions ("everything about", "who is", "what happened").
 - `--session` lets `expand` resolve pointers from earlier calls; Claude Code passes a stable id per conversation.
 - `--format md` is the default for Bash callers; `json` is for the optional MCP wrapper.
@@ -249,9 +251,9 @@ A tier is a ceiling, not a target: a `deep` call that resolves in one step stops
 | --- | --- | --- | --- | --- | --- | --- |
 | quick | Sonnet | Haiku | 1 | 0 | no | One known lookup: "get ticket PROJ-123". |
 | standard (default) | Sonnet | Haiku | 12 | 2 | no | Everything else, including the four seed queries. |
-| deep | Opus | Sonnet | 30, or one script | 3 | yes | Multi-source tracing with judgment inside the question, or when standard reports low confidence. |
+| deep | Opus (script) / Sonnet (crawl hops) | Sonnet | crawl: hop depth 3 within `--budget`; or one script | per hop | yes | Discovery that follows what results mention (crawl), or multi-source tracing with judgment inside the question (script), or when standard reports low confidence. |
 
-The oracle escalates one tier by itself when it hits the cap without a `complete` check, says so in the trace, and never escalates into `deep` without `--level deep` or `ORACLE_AUTO_DEEP=1`, because deep calls can run a minute and cost real money.
+The oracle escalates one tier by itself when it hits the cap without a `complete` check, says so in the trace, and never escalates into `deep` without `--level deep` or `ORACLE_AUTO_DEEP=1`, because deep calls can run a minute and cost real money. The same holds for budget: `--budget unlimited` is only ever set by the caller or by `ORACLE_DEEP_BUDGET`, never chosen by the oracle.
 
 **Model configuration.** Every model is a PydanticAI model string from the environment, so the same binary runs at home and at work:
 
@@ -267,9 +269,34 @@ PydanticAI's OpenAI-compatible provider targets the LiteLLM proxy; its Bedrock p
 
 **Cost expectations at standard.** Two model calls (plan, distill) plus a check: roughly 8–15K input tokens and 1–2K output per invocation, almost all of it in the sub-agent. The main agent receives under 1.5K. That ratio is the point.
 
+## Deep tier: crawl
+
+The crawl is the default deep strategy for discovery-shaped questions: search, read what the results mention, search those, and repeat. "What is going on with feature X" finds a design doc, which names people and a Jira key; the ticket has an epic; the epic links a PDD; the PDD names more people. No list of entity types is declared anywhere, because no list could cover every tool: a model reads each hop's results and says what is worth searching next, in plain words.
+
+**One hop.**
+
+1. **Extract** (Haiku). Reads the summary fields and capped slices of the hop's new results, inside the delimited data block, under the same prompt-injection rule as distill. Returns terms, each with a value, a plain-words description and a relevance score for the question: `PLAT-412` / "Jira ticket the design doc links to" / 0.9; `Jon` / "first name only; reviewed the gateway runbook, OPS space" / 0.6.
+2. **Plan** (Sonnet, one call for the whole hop). The terms' descriptions are the ranker queries ("person Jon, OPS space" ranks workiq first); the planner turns all admitted terms into one batch of steps. Splitting extract from plan keeps "Sonnet plans; Haiku only extracts" true.
+3. **Validate.** Every step goes through `plan_errors` with a retry, exactly as in the standard tier. Terms come from tool output and are untrusted, so text planted in a Confluence page cannot steer the crawl outside the registry or past read-only.
+4. **Run** in parallel under per-tool concurrency. A normalised `(op, params)` already run in this crawl is skipped, which is also what makes a crawl converge.
+
+Stop when the hop depth is reached (default 3, `--depth`), when a hop yields no new terms, or when the budget is spent. Hop depth counts hops inside one invocation; it is not the recursion guard's call-tree depth.
+
+**Budget.** Tool calls cost no model tokens; extraction, planning and the summary do. Before each hop the crawl estimates its cost from the result sizes measured so far, keeps a reserve for the summary, and admits every new term if they fit. Only when they do not are terms admitted in relevance order until the budget is used, so there is no fixed top-k. `--budget <tokens>` sets it per call and `ORACLE_DEEP_BUDGET` sets the default. `--budget unlimited` leaves hop depth as the only limit and still keeps dedupe, per-tool concurrency (pacing, not a cap), a Ctrl-C that returns a summary of everything found so far, and a final cost line (tokens, searches, wall time). At home the crawl shares the Claude subscription with the main Claude Code session, so an unlimited crawl can spend the usage window the main session needs; at work it is Bedrock spend.
+
+**Summary.** Map then reduce: Haiku summarises each result in parallel, one Sonnet call merges them into the output contract. The contract does not change (3–15 findings with pointers); Coverage adds hops run, searches run, terms found but not expanded (with why: budget or depth) and the cost.
+
+**Why not a recursive `oracle` call per term.** The design allows nested calls (workflows use `ctx.oracle.ask()`, subprocesses carry `ORACLE_TRACE`), and recursion would reuse the whole pipeline. As the crawl's inner loop it costs more than it saves: every child runs its own plan, check and distill, so model calls grow with the number of terms instead of the number of hops; each child pays process start (and, at home, a Claude Code process of 0.2–0.6 GB, so a 50-term hop is 50 of them); siblings need a shared seen-set anyway to avoid re-searching each other's terms; and the recursion guard (depth 3, tier clamped one lower per level) would quietly turn hop 2 into a standard call and hop 3 into a quick one. Recursion stays the right tool when one term is itself a question that needs its own investigation: the extractor may mark a term `investigate`, and that term alone becomes a nested `oracle` call under the guard.
+
+**SDK.** The crawl is about 30 lines on a small `oracle.sdk` that model-written scripts and workflows use too: `extract(results)`, `fan_out(steps)`, `summarize(results)`, `crawl(question, depth, budget)` and the shared `budget`, on top of the generated per-op library below. A script that needs custom logic calls `crawl()` or its parts instead of re-implementing them, which keeps scripts short and their mistakes few. smolagents' CodeAgent and Cloudflare's Code Mode are the precedent for models writing code against a tool API; this stays a module inside the oracle, not a framework.
+
+**Logging for dreaming.** Each op row records its hop and the term or pointer that led to it, so dreaming sees chains as sequences of op refs (`confluence.search → jira.get → jira.search(epic) → confluence.get`) with no entity types involved. A chain seen in three or more successful crawls becomes a recipe candidate, as for scripts.
+
+**Proposed acceptance case (for the M4 gate; golden cases are the user's call).** The home fixtures already hold a three-hop chain: the Teams message "Ingestion gateway 5xx again during the Salesforce batch, I took OPS-1206" → `jira:OPS-1206` → the Confluence runbook "Runbook: ingestion gateway 5xx" → its author Priya Raman → `workiq.people.lookup`. Query: "what is going on with the ingestion gateway 5xx errors", at `deep`. Passes when the findings include the ticket, the runbook and Priya's role, each with a pointer, and Coverage lists the hops.
+
 ## Deep tier: generated library and script runner
 
-The deep tier exists for questions where the chain itself needs judgment at each hop: "trace how a request from the API reaches the token store" across the graph DB and semantic search. An Opus planner writes a short Python script against a typed library instead of a DAG, so loops, conditionals and filtering happen in code and no intermediate data reaches a model.
+Scripts are for questions where the chain itself needs judgment at each hop that a fixed crawl cannot express: "trace how a request from the API reaches the token store" across the graph DB and semantic search. An Opus planner writes a short Python script against a typed library instead of a DAG, so loops, conditionals and filtering happen in code and, on this path, no intermediate data reaches a model except through the SDK's `extract` and `summarize` calls.
 
 **Generated library.** `oracle tool build` reads every manifest and emits `oracle_tools/<tool>.py`: one typed async function per op, with the manifest's docstring, pydantic-validated arguments, the same executor underneath (timeouts, pagination, caps, pointers), and `mutating` ops simply absent. The library is regenerated on manifest change and never edited by hand.
 
@@ -302,7 +329,7 @@ Every invocation writes one record to `~/.oracle/log.sqlite`; the record is the 
 | Table | Columns |
 | --- | --- |
 | `calls` | call\_id, session, ts, query, intent, level, breadth, ranked\_tools (scores), plan (json), replans, escalated, wall\_ms, tokens\_in, tokens\_out, model\_calls, confidence, gaps |
-| `ops` | call\_id, step\_id, op, params, ok, error, n\_results, ms, truncated, bytes |
+| `ops` | call\_id, step\_id, op, params, ok, error, n\_results, ms, truncated, bytes, hop, parent (term or pointer that led here; crawl only) |
 | `pointers` | session, pointer, call\_id, expanded\_at |
 | `feedback` | call\_id, source (agent or human), useful, note, ts |
 
@@ -332,6 +359,12 @@ Milestone 2 is done when all four pass at `standard` with Coverage reporting wha
 | "who is andrew neville" | breadth, entity | recipe people.profile (workiq.people, acli.jira assignee, workiq.teams from:, git authors via code-graph if indexed) | Role and team from workiq, recent tickets and messages with pointers, and an explicit note when a source has no match (not a guess). |
 
 Add to the set as misses appear. A query is only added with the tool list it *should* have used, so the set encodes intent, not current behaviour.
+
+**Planned cases, added only once the phases that support them exist** (decided 2026-10-24):
+
+- **Name follow-up, full name** (after M2's completeness check): "who wrote the ownership transfer design and what team are they on" → `acli.confluence.search` → author → `workiq.people.lookup`. Passes when the findings carry the author's role and team with pointers.
+- **Name follow-up, first name only** (after M2): a fixture page that says only "Jon reviewed the gateway runbook", with two Jons in the directory. Passes when the findings list both candidates with the evidence for each and Coverage marks the ambiguity, or narrow to one using the page's evidence; never a silent pick.
+- **Deep crawl, three hops** (after M4): see "Deep tier: crawl".
 
 ## Module layout and milestones
 
@@ -385,7 +418,7 @@ tests/            # unit tests per module + golden runner
   fakes/            # fake acli and workiq CLIs, their fixtures, and the acme fixture code repo
 ```
 
-`uv` for packaging, `typer` for the CLI, `pydantic-ai` (as `pydantic-ai-slim[openai,anthropic]`) for the three agents, `rank_bm25` and optional `sentence-transformers` for ranking, `aiosqlite` for caches and logs, `pyyaml` for manifests, and `claude-agent-sdk` as the optional `claude-code` extra for the home model route. JSONPath is a hand-written subset (`$`, `.key`, `['key']`, `[n]`, `[*]`) in `exec/jsonpath.py`. One process, asyncio throughout. Dev-only dependencies (a \`dev\` dependency group in \`pyproject.toml\`, never shipped): \`pytest\`, \`pytest-asyncio\`, \`ruff\`, \`pyright\`, \`radon\` or \`xenon\`, \`vulture\`, driven by a Makefile whose \`make lint\` runs lint, type, complexity, maintainability and dead-code checks and \`make test\` runs the suite and the golden set.
+`uv` for packaging, `typer` for the CLI, `pydantic-ai` (as `pydantic-ai-slim[openai,anthropic]`) for the three agents, `rank_bm25` and optional `sentence-transformers` for ranking, `aiosqlite` for caches and logs, `pyyaml` for manifests, and `claude-agent-sdk` as the optional `claude-code` extra for the home model route. JSONPath is a hand-written subset (`$`, `.key`, `['key']`, `[n]`, `[*]`) in `registry/jsonpath.py`, so manifests are checked at load time. One process, asyncio throughout. Dev-only dependencies (a \`dev\` dependency group in \`pyproject.toml\`, never shipped): \`pytest\`, \`pytest-asyncio\`, \`ruff\`, \`pyright\`, \`radon\` or \`xenon\`, \`vulture\`, driven by a Makefile whose \`make lint\` runs lint, type, complexity, maintainability and dead-code checks and \`make test\` runs the suite and the golden set.
 
 &#91;embedded content: milestones · 4 phases, 4 gates\]
 
@@ -398,16 +431,18 @@ The same plan as a table, for exports that drop the drawing:
 | M1 Core | Registry schema and loader; ranker (exact name + BM25); executor with argv runner, pagination, caps, pointers; manifests for code-search, code-graph, acli, workiq; `quick` tier; `oracle expand`; log schema | `oracle tool test` passes every manifest example; unit tests green |
 | M2 Standard | Planner (Plan DAG), recipes (the four seeded), completeness check, distill, Coverage/Refine/Trace output; `standard` tier; feedback command | `oracle eval` passes all four golden cases at `standard` |
 | M3 Scale | Remaining manifests (kubectl, argocd, es, mongo, custom scripts); breadth mode; `oracle report` implicit signals; ingestion workflow (`oracle tool add`); skills loader; MCP wrapper; environment profiles | `oracle tool test --ranker` top-3 hit rate at or above 90% on `ranker_eval.yaml`; golden set still green |
-| M4 Deep | Codegen of `oracle_tools`; script agent and runner with v1 isolation; `deep` tier; workflow protocol and recursion guard; dreaming workflow after a few weeks of logs; container only if deep calls are frequent | One deep-tier script promoted to a recipe through the logs; golden set still green |
+| M4 Deep | Codegen of `oracle_tools`; `oracle.sdk` (extract, fan_out, summarize, crawl, budget); the crawl with `--depth` and `--budget`; script agent and runner with v1 isolation; `deep` tier; workflow protocol and recursion guard; dreaming workflow after a few weeks of logs; container only if deep calls are frequent | One deep-tier script or crawl chain promoted to a recipe through the logs; the crawl acceptance case passes (if adopted); golden set still green |
 
 ### Developing on the personal laptop
 
 The oracle is built on a personal laptop that lacks most work tools, then pulled onto the work laptop. Two pieces make the gates meaningful at home:
 
-- **Fakes.** `tests/fakes/bin/acli` and `workiq` are stdlib Python CLIs with realistic `--help` and JSON output over fixtures in `tests/fakes/data/`, with times stored as offsets from now so "today" stays today. Their flags and output shapes are guesses at the real tools. They double as practice targets for `oracle tool add`.
+- **Fakes.** `tests/fakes/bin/acli` and `workiq` are stdlib Python CLIs with realistic `--help` and JSON output over fixtures in `tests/fakes/data/`, with times stored as offsets from now so "today" stays today. Their flags and output shapes are guesses at the real tools. They double as practice targets for `oracle tool add`. The fake Jira and Confluence understand a strict JQL/CQL subset: AND, OR, parentheses, `=`, `!=`, `~`, `!~`, `IN`, `NOT IN`, `resolution = Unresolved`, and time comparisons on `updated` (`-1d`, `-2w`, `startOfDay()`, `startOfWeek()`, ISO). A clause they cannot evaluate (`reporter was ...`) makes the fake exit 2 with the supported list, so a plan the fake cannot check is an op error, never a false pass.
 - **Fixture code repo.** `tests/fakes/acme/` is a small codebase whose names match the fixtures (`transfer_ownership` and its callers for PLAT-412; `sync_salesforce_changes` → gateway client → ingestion gateway → event bus for INT-77). `make fixtures` indexes it into a repo-local vex db and into codebase-memory (Ollama is needed for the embeddings; `make test` does not need either).
 
 `profiles/home.toml` points at its own registry, `profiles/home/tools/`, with code-search (vex), code-graph (`adapters/bin/cmm-graph`) and the two fakes. `registry/tools/` stays the work registry and starts empty: on the work laptop each real tool is added with `oracle tool add`, one at a time, and the home manifests are never touched. Registry precedence is `ORACLE_REGISTRY`, then the profile's `registry`, then `config.toml`, then `registry/tools/`. Op names referenced by `golden.yaml` must survive the re-import: a unit test checks them against the home registry, and `oracle tool test` notes any golden op the active registry lacks.
+
+**Registry problems and notes.** `oracle tool test` fails on problems: a manifest that does not parse or validate (including a JSONPath outside the supported subset), a name that does not match its file, an unreadable file or a missing registry directory. Expected states are notes and do not fail the gate: a refused mutating tool or op, a `chains_to` or `enum_from` reference to a tool that is not added yet, and golden ops the active registry lacks. A reference to an inactive tool is fine and silent; a reference to a missing op on a tool that is loaded is a typo and a problem. Naming a tool that is not active, or testing nothing at all, fails.
 
 **Quick tier in M1.** The ranker shortlists tools, and one planner call (Sonnet) picks a single op and fills its params; there is no completeness check and no distill, so findings are each record's summary fields, minus values the pointer already carries. Levels that are not built yet run as quick and say so in the trace.
 

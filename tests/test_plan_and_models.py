@@ -45,6 +45,9 @@ def test_plan_errors_catch_unknown_ops_params_and_limits(fake_registry: Registry
     assert any("unique" in e for e in errors)
     assert any("unknown params" in e for e in errors)
     assert any("not in the shortlist" in e for e in errors)
+    dash = Plan(interpretation="x", steps=[Step(id="s1", op="workiq.people.lookup",
+                                               params={"name": "-rf"})])  # fmt: skip
+    assert any("cannot start with '-'" in e for e in plan_errors(dash, fake_registry, allowed, 1))
 
 
 async def test_planner_retries_with_validation_feedback(fake_registry: Registry) -> None:

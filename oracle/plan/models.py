@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from oracle.exec.runners.argv import ArgvError, LeadingDashError, build_argv
 from oracle.registry.loader import Registry
 from oracle.registry.params import ParamError, validate_params
 
@@ -41,7 +42,11 @@ def _step_errors(step: Step, registry: Registry, allowed: set[str], ids: set[str
     errors = [f"after references unknown step {a!r}" for a in step.after if a not in ids]
     _, op = registry.resolve(step.op)
     try:
-        validate_params(op, step.params)
-    except ParamError as exc:
+        build_argv(op.argv, validate_params(op, step.params))
+    except LeadingDashError as exc:  # the same checks the executor runs, worded for the planner
+        errors.append(
+            f"param {exc.name!r} cannot start with '-'; rephrase {exc.value!r} or omit it"
+        )
+    except (ParamError, ArgvError) as exc:
         errors.append(str(exc))
     return errors

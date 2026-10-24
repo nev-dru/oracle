@@ -5,20 +5,15 @@ import json
 import sys
 from typing import Annotated, NoReturn
 
-import pydantic_ai
 import typer
 
-from oracle.ask import AskRequest, ask
 from oracle.config import REPO_ROOT, Config, ConfigError, load_config
 from oracle.exec.executor import Executor
 from oracle.exec.pointers import SpillError, expand_spill
-from oracle.exec.selftest import golden_ops_missing, run_examples
+from oracle.exec.selftest import ExampleResult, golden_ops_missing, run_examples
 from oracle.log.store import open_store
 from oracle.registry.loader import Registry, load_registry
 from oracle.render import to_json, to_markdown
-
-# The oracle owns its stdout: the main agent reads it, so no first-run banner.
-pydantic_ai.BANNER_ENABLED = False
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help=__doc__)
 tool_app = typer.Typer(help="Registry management: list and test manifests.")
@@ -57,6 +52,9 @@ def ask_cmd(
     session: Session = None,
 ) -> None:
     """Find things across every registered source (the default command)."""
+    # Imported here: pydantic-ai is the slow import, and expand and tool commands never need it.
+    from oracle.ask import AskRequest, ask
+
     cfg, registry = _setup()
     req = AskRequest(question, intent, level, _csv(scope), _csv(prefer), session)
     try:
@@ -93,7 +91,7 @@ def expand(
 
 @tool_app.command("list")
 def tool_list() -> None:
-    """Active tools, their ops, and any manifest problems."""
+    """Active tools, their ops, and any manifest problems or notes."""
     cfg, registry = _setup()
     profile = cfg.profile.name if cfg.profile else "none"
     typer.echo(f"registry {cfg.registry_dir}  profile {profile}")
@@ -105,6 +103,8 @@ def tool_list() -> None:
         typer.echo(f"inactive in this profile: {', '.join(registry.inactive)}")
     for problem in registry.problems:
         typer.echo(f"problem: {problem}")
+    for note in registry.notes:
+        typer.echo(f"note: {note}")
 
 
 @tool_app.command("test")
@@ -113,19 +113,32 @@ def tool_test(
 ) -> None:
     """Run every manifest example against the real tool. Exit 1 if any fails."""
     cfg, registry = _setup()
+    unknown = sorted(set(names or []) - set(registry.tools))
+    if unknown:
+        problems = "".join(f"\n  problem: {p}" for p in registry.problems)
+        _die(f"unknown tools {unknown}; active: {sorted(registry.tools)}{problems}")
     executor = Executor(registry, cfg.tool_env(), cfg.spill_dir)
     results = asyncio.run(run_examples(registry, executor, set(names) if names else None))
+    raise typer.Exit(1 if _report(results, registry) else 0)
+
+
+def _report(results: list[ExampleResult], registry: Registry) -> int:
+    """Print example results, manifest problems and notes; return the number of failures."""
     for r in sorted(results, key=lambda r: (r.op, r.index)):
-        mark = "PASS" if r.ok else "FAIL"
-        typer.echo(f"{mark}  {r.op}[{r.index}]  {r.detail}  ({r.ms} ms)")
+        typer.echo(f"{'PASS' if r.ok else 'FAIL'}  {r.op}[{r.index}]  {r.detail}  ({r.ms} ms)")
     for problem in registry.problems:
         typer.echo(f"FAIL  manifest  {problem}")
+    notes = list(registry.notes)
     missing = golden_ops_missing(registry, REPO_ROOT / "golden.yaml")
     if missing:
-        typer.echo(f"note: golden.yaml names ops this registry lacks: {', '.join(missing)}")
-    failed = sum(not r.ok for r in results) + len(registry.problems)
-    typer.echo(f"{len(results) - sum(not r.ok for r in results)}/{len(results)} examples passed")
-    raise typer.Exit(1 if failed else 0)
+        notes.append(f"golden.yaml names ops this registry lacks: {', '.join(missing)}")
+    for note in notes:
+        typer.echo(f"note: {note}")
+    passed = sum(r.ok for r in results)
+    typer.echo(f"{passed}/{len(results)} examples passed")
+    if not results:
+        typer.echo("FAIL  nothing was tested")
+    return len(results) - passed + len(registry.problems) + (0 if results else 1)
 
 
 COMMANDS = {"ask", "expand", "tool", "--help", "-h"}

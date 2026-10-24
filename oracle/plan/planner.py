@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import pydantic_ai
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.models import Model
 
@@ -11,6 +12,10 @@ from oracle.plan.models import Plan, plan_errors
 from oracle.rank.index import RankedTool
 from oracle.registry.loader import Registry
 from oracle.registry.schema import Op, Param, Tool
+
+# The oracle owns its stdout (the main agent reads it), so pydantic-ai's first-run banner is off
+# for every agent, whichever command builds it.
+pydantic_ai.BANNER_ENABLED = False
 
 PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 PLAN_RETRIES = 2

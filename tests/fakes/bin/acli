@@ -8,28 +8,36 @@ from __future__ import annotations
 
 import argparse
 
-from _fakelib import after, clauses, emit, fail, load, matches, page, since
+from _fakelib import compare, compare_time, compile_query, emit, fail, load, matches, page, unquote
 
 ME = "andrew.neville@example.com"
 
 
-def jira_match(issue: dict, field: str, op: str, value: str) -> bool:
-    if field in ("text", "summary"):
-        return matches(value, issue["summary"], issue.get("description"))
+def jira_match(issue: dict, field: str, op: str, value: str) -> bool | None:
+    if field in ("text", "summary") and op in ("~", "!~"):
+        hit = matches(unquote(value), issue["summary"], issue.get("description"))
+        return hit == (op == "~")
     if field == "assignee":
-        want = ME if value.lower() in ("currentuser()", "currentuser") else value.lower()
-        return want in (issue.get("assignee_email", ""), issue.get("assignee", "").lower())
-    if field == "updated" and op == ">=":
-        return after(issue["updated"], since(value))
-    if field in ("key", "project", "status"):
-        return str(issue.get(field, "")).lower() == value.lower()
-    return True
+        me = value.strip().lower() in ("currentuser()", "currentuser")
+        want = ME if me else unquote(value)
+        mine = want.lower() in (issue.get("assignee_email", ""), issue.get("assignee", "").lower())
+        return {"=": mine, "!=": not mine}.get(op)
+    if field == "updated":
+        return compare_time(op, issue["updated"], value)
+    if field in ("key", "project", "status", "priority"):
+        return compare(op, str(issue.get(field, "")), value)
+    if field == "resolution" and unquote(value).lower() == "unresolved" and op in ("=", "!="):
+        return (issue["status"] != "Done") == (op == "=")
+    return None
+
+
+JQL = "text/summary ~, assignee, key, project, status, priority, resolution = Unresolved, updated"
+CQL = "text/title ~, space, type"
 
 
 def jira_search(a: argparse.Namespace) -> None:
-    rows = load("jira")
-    for field, op, value in clauses(a.jql):
-        rows = [r for r in rows if jira_match(r, field, op, value)]
+    keep = compile_query(a.jql, jira_match, JQL)
+    rows = [r for r in load("jira") if keep(r)]
     rows.sort(key=lambda r: r["updated"], reverse=True)
     chunk, nxt = page(rows, a.start_at, a.limit)
     emit({"issues": chunk, "total": len(rows), "next_start_at": nxt})
@@ -43,20 +51,18 @@ def jira_view(a: argparse.Namespace) -> None:
     fail(f"work item {a.key} not found")
 
 
-def conf_match(page_: dict, field: str, value: str) -> bool:
-    if field in ("text", "title"):
+def conf_match(page_: dict, field: str, op: str, value: str) -> bool | None:
+    if field in ("text", "title") and op in ("~", "!~"):
         body = page_.get("excerpt") if field == "text" else None
-        return matches(value, page_["title"], body)
-    if field == "space":
-        return page_["space"].lower() == value.lower()
-    return True
+        return matches(unquote(value), page_["title"], body) == (op == "~")
+    if field in ("space", "type"):
+        return compare(op, str(page_.get(field, "page")), value)
+    return None
 
 
 def conf_search(a: argparse.Namespace) -> None:
-    rows = load("confluence")
-    for field, _op, value in clauses(a.cql):
-        rows = [r for r in rows if conf_match(r, field, value)]
-    emit({"results": rows[: a.limit]})
+    keep = compile_query(a.cql, conf_match, CQL)
+    emit({"results": [r for r in load("confluence") if keep(r)][: a.limit]})
 
 
 def conf_view(a: argparse.Namespace) -> None:

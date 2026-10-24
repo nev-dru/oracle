@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 
-from _fakelib import NOW, after, emit, load, matches, since
+from _fakelib import NOW, after, emit, load, matches, since_arg
 
 
 def people_lookup(a: argparse.Namespace) -> None:
@@ -17,7 +17,7 @@ def people_lookup(a: argparse.Namespace) -> None:
 
 
 def messages(kind: str, a: argparse.Namespace) -> None:
-    start = since(a.since)
+    start = since_arg(a.since)
     rows = [
         m
         for m in load(kind)

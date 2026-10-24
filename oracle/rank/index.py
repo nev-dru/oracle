@@ -4,8 +4,9 @@ One document per op; results are grouped by tool so the planner sees each select
 op list (hierarchical tool -> op). No model call, so a wrong pick can be debugged from here.
 Embeddings are a later stage (DESIGN.md: only once BM25 misses show up in ranker_eval).
 A tool scores by its best op, so tools with many ops are not favoured for their size. The
-shortlist is padded to MIN_TOOLS, because domain words ("salesforce") rarely appear in tool
-docs and a missing tool costs accuracy while an extra one costs only planner tokens.
+shortlist is padded to `top` with unmatched tools, because domain words ("salesforce", a
+person's name) rarely appear in tool docs, and a missing tool costs accuracy while an extra one
+costs only planner tokens.
 """
 
 import re
@@ -16,9 +17,12 @@ from rank_bm25 import BM25Okapi
 from oracle.registry.loader import Registry
 
 RRF_K = 60
-MIN_TOOLS = 3
+TAG_WEIGHT = 2  # tags are the curated routing words; prose in `when` lines is incidental
 EXACT_BONUS = 1.0
 PREFER_BONUS = 0.5
+# "who" stays: it routes to people sources (workiq is tagged `who`). The other interrogatives
+# go, because tool docs use them as plain English ("when the exact name is unknown"). "x" goes
+# because docs use it as a placeholder ("who is X").
 STOPWORDS = frozenset(
     [
         "a",
@@ -49,7 +53,6 @@ STOPWORDS = frozenset(
         "when",
         "where",
         "which",
-        "who",
         "why",
         "with",
         "x",
@@ -89,7 +92,8 @@ class Ranker:
             for op in tool.ops:
                 self.refs.append(f"{tool.name}.{op.name}")
                 text = " ".join(
-                    [tool.name, op.name, tool.description, " ".join(tool.tags), tool.when, op.when]
+                    [tool.name, op.name, tool.description, " ".join(tool.tags * TAG_WEIGHT)]
+                    + [tool.when, op.when]
                     + [f"{n} {p.desc}" for n, p in op.params.items()]
                     + [" ".join(str(v) for v in ex.params.values()) for ex in op.examples]
                 )
@@ -108,7 +112,7 @@ class Ranker:
             return []
         fused, matched = self._bm25_by_tool(self._bm25, query)
         pinned = self._exact(query) | set(scope or [])
-        fused = self._adjust(fused, pinned, prefer or [], scope)
+        fused = self._adjust(fused, pinned, prefer or [], scope, top)
         ranked = [
             RankedTool(
                 tool=name,
@@ -128,8 +132,9 @@ class Ranker:
         pinned: set[str],
         prefer: list[str],
         scope: list[str] | None,
+        top: int,
     ) -> dict[str, float]:
-        """Exact-name and --prefer bonuses, the --scope filter, and padding to MIN_TOOLS."""
+        """Exact-name and --prefer bonuses, the --scope filter, and padding to `top`."""
         out = dict(fused)
         for name in pinned:
             out[name] = out.get(name, 0.0) + EXACT_BONUS
@@ -138,7 +143,7 @@ class Ranker:
         allowed = [n for n in self.registry.tools if not scope or n in scope]
         out = {n: score for n, score in out.items() if n in allowed}
         for name in allowed:
-            if len(out) >= MIN_TOOLS:
+            if len(out) >= top:
                 break
             out.setdefault(name, 0.0)
         return out
