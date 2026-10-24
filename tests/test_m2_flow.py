@@ -162,8 +162,7 @@ needs_fixtures = pytest.mark.skipif(
 
 @pytest.fixture
 def home_registry(home_cfg: Config) -> Registry:
-    assert home_cfg.profile and home_cfg.profile.tools
-    return load_registry(home_cfg.registry_dir, set(home_cfg.profile.tools))
+    return load_registry(home_cfg.registry_dir)
 
 
 @needs_fixtures

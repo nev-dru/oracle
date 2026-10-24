@@ -4,6 +4,8 @@ breadth: true
 steps:
   - {id: meetings, op: workiq.calendar.today}
   - {id: tickets, op: acli.jira.search, params: {jql: "updated >= startOfDay() ORDER BY updated DESC", limit: 20}}
-  - {id: deploys, op: argocd.app.history, params: {since: "{window_start}"}}
-  - {id: cluster, op: kubectl.events, params: {since: "24h"}}
+  # app.list carries each app's last operation (finishedAt, result): today's deploys without
+  # knowing app names; app.history needs a name, so the check can follow up per app
+  - {id: deploys, op: argocd.app.list}
+  - {id: cluster, op: kubectl.events, params: {all_namespaces: true, types: Warning}}
   - {id: messages, op: workiq.teams.search, params: {since: "{window_start}", limit: 20}}

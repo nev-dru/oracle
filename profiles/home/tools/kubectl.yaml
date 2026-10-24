@@ -1,0 +1,134 @@
+name: kubectl
+description: 'Read-only Kubernetes inspection: lists pods, deployments, namespaces and events (kubectl.get),
+  lists warnings and other events (kubectl.events), and reads recent pod log lines (kubectl.logs).'
+tags:
+- kubernetes
+- pods
+- deployments
+- namespaces
+- logs
+- events
+- cluster
+when: 'What is running in the cluster right now: pod or deployment status, restarts, namespaces, Kubernetes
+  events and warnings, or what a pod is logging.'
+not_when: Tickets, runbooks or design docs (use acli); Teams, mail or meetings (use workiq); source code,
+  symbols or callers (use code-search or code-graph).
+ops:
+- name: get
+  when: List pods, deployments, events or namespaces, optionally by namespace or label.
+  params:
+    type:
+      required: true
+      desc: resource type
+      enum:
+      - pods
+      - deployments
+      - events
+      - namespaces
+    namespace:
+      desc: namespace name, e.g. payments
+    selector:
+      desc: label query like app=billing-api
+    all_namespaces:
+      type: bool
+      default: false
+      desc: list across all namespaces
+  argv:
+  - kubectl
+  - get
+  - '{type}'
+  - '{?namespace:-n,namespace}'
+  - '{?selector:-l,selector}'
+  - '{?all_namespaces:-A}'
+  - -o
+  - json
+  returns:
+    path: $.items[*]
+    id_field: metadata.uid
+    summary_fields:
+    - kind
+    - metadata.name
+    - metadata.namespace
+    - status.phase
+    pointer: kubectl:{metadata.uid}
+  examples:
+  - params:
+      type: pods
+      all_namespaces: true
+    expect:
+      min_results: 1
+      has_fields:
+      - metadata.uid
+      - kind
+      - metadata.name
+- name: events
+  when: List Kubernetes events, such as warnings, optionally for one object.
+  params:
+    namespace:
+      desc: namespace name
+    for:
+      desc: TYPE/NAME like pod/payments-api-7d9f-x2k
+    types:
+      desc: event type, e.g. Warning
+    all_namespaces:
+      type: bool
+      default: false
+      desc: across all namespaces
+  argv:
+  - kubectl
+  - events
+  - '{?namespace:-n,namespace}'
+  - '{?for:--for,for}'
+  - '{?types:--types,types}'
+  - '{?all_namespaces:-A}'
+  - -o
+  - json
+  returns:
+    path: $.items[*]
+    id_field: metadata.uid
+    summary_fields:
+    - message
+    - metadata.name
+    - metadata.namespace
+    - reason
+    pointer: kubectl:{metadata.uid}
+  examples:
+  - params:
+      all_namespaces: true
+    expect:
+      min_results: 1
+      has_fields:
+      - metadata.uid
+      - message
+      - metadata.name
+- name: logs
+  when: Read recent log lines from a pod.
+  params:
+    pod:
+      required: true
+      desc: pod name
+    namespace:
+      desc: namespace name
+    tail:
+      type: int
+      default: 50
+      desc: number of recent lines
+      max: 500
+    since:
+      desc: duration like 5m or 3h
+  argv:
+  - kubectl
+  - logs
+  - '{pod}'
+  - '{?namespace:-n,namespace}'
+  - --tail={tail}
+  - '{?since:--since=,since}'
+  returns:
+    format: text
+  examples:
+  - params:
+      pod: ingestion-gateway-6f4-a1b
+      namespace: prod
+      tail: 20
+    expect:
+      min_results: 1

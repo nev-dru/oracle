@@ -4,8 +4,7 @@
 
 # Home manifests live with the profile, so registry/tools stays the work registry that
 # `oracle tool add` fills one tool at a time.
-registry = "home/tools"
-tools = ["code-search", "code-graph", "acli", "workiq"]
+registry = "home/tools"  # every manifest here is active; `oracle tool activate` adds to it
 path_prepend = ["../adapters/bin", "../tests/fakes/bin"]
 
 [env]

@@ -17,9 +17,11 @@ from oracle.exec.parse import ParseError, parse_output
 from oracle.exec.pointers import pointer_for, record_id
 from oracle.exec.redact import redact
 from oracle.exec.runners.argv import ArgvError, build_argv, is_set
+from oracle.exec.runners.mcp import McpError, call_mcp
 from oracle.registry import jsonpath
 from oracle.registry.loader import Registry
 from oracle.registry.params import ParamError, validate_params
+from oracle.registry.safety import rendered_problem
 from oracle.registry.schema import Op, Tool
 
 Status = Literal["ok", "error", "not_configured", "invalid", "skipped", "unavailable"]
@@ -100,15 +102,38 @@ class Executor:
 
     async def _page(self, tool: Tool, op: Op, result: OpResult, cursor: Any) -> tuple[bytes, Any]:
         """Fetch and parse one page; return its raw bytes and the next cursor, if any."""
+        if op.mcp_tool and tool.mcp:
+            raw = await self._mcp(tool, op, result)
+            result.pages += 1
+            self._parse_page(tool, op, raw, result)
+            return raw, None  # MCP results are not paged
         params = dict(result.params)
         if op.paginate:
             params[op.paginate.param] = cursor
         argv, stdin = build_argv(op.argv, params)
+        if problem := rendered_problem(argv):  # the command exactly as it would run
+            raise OpFailed("invalid", problem)
         result.argv = argv
         raw = await self._spawn(tool, argv, stdin)
         result.pages += 1
         doc = self._parse_page(tool, op, raw, result)
         return raw, jsonpath.first(doc, op.paginate.next) if op.paginate else None
+
+    async def _mcp(self, tool: Tool, op: Op, result: OpResult) -> bytes:
+        """An MCP tool takes the op's params as its arguments (unset ones left out)."""
+        assert tool.mcp is not None and op.mcp_tool is not None
+        arguments = {k: v for k, v in result.params.items() if v is not None}
+        result.argv = [tool.mcp.command, *tool.mcp.args, f"mcp:{op.mcp_tool}"]
+        async with self._sems[tool.name]:
+            try:
+                text = await call_mcp(
+                    tool.mcp, op.mcp_tool, arguments, self.env, tool.limits.timeout_s
+                )
+            except McpError as exc:
+                raise OpFailed(exc.status, str(exc)) from None
+            except TimeoutError:
+                raise OpFailed("error", f"timed out after {tool.limits.timeout_s:g}s") from None
+        return text.encode()
 
     def _parse_page(self, tool: Tool, op: Op, raw: bytes, result: OpResult) -> Any:
         try:

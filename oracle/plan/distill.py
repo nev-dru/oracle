@@ -6,6 +6,7 @@ that is not one of this call's results is rejected, so no finding cites somethin
 found.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -42,6 +43,20 @@ class Distilled(BaseModel):
 @dataclass
 class DistillContext:
     pointers: set[str]
+    tools: set[str]
+
+
+def refine_problems(refine: list[str], tools: set[str]) -> list[str]:
+    """Each refinement must be a runnable `oracle` command naming only real tools."""
+    out = [
+        f"refine must start with `oracle `: {r!r}" for r in refine if not r.startswith("oracle ")
+    ]
+    for r in refine:
+        scope = re.search(r"--scope[ =]+[\"']?([\w,-]+)", r)
+        unknown = sorted(set(scope[1].split(",")) - tools) if scope else []
+        if unknown:
+            out.append(f"--scope names tools that do not exist {unknown}; tools: {sorted(tools)}")
+    return out
 
 
 def build_distiller(model: Model | str) -> Agent[DistillContext, Distilled]:
@@ -57,11 +72,7 @@ def build_distiller(model: Model | str) -> Agent[DistillContext, Distilled]:
     def _valid(ctx: RunContext[DistillContext], out: Distilled) -> Distilled:
         bad = [f.pointer for f in out.findings if f.pointer not in ctx.deps.pointers]
         errors = [f"pointers not in the data: {bad}; copy pointers exactly"] if bad else []
-        errors += [
-            f"refine must start with `oracle `: {r!r}"
-            for r in out.refine
-            if not r.startswith("oracle ")
-        ]
+        errors += refine_problems(out.refine, ctx.deps.tools)
         if errors:
             raise ModelRetry("Fix these problems:\n- " + "\n- ".join(errors))
         return out
@@ -88,6 +99,7 @@ async def run_distill(
         lines.append("Gaps the check found: " + "; ".join(check_gaps))
     lines += ["", digest(runs, registry, per_step=25, slice_chars=300)]
     pointers = {p for run in runs if run.result.ok for p in run.result.pointers}
-    result = await agent.run("\n".join(lines), deps=DistillContext(pointers))
+    deps = DistillContext(pointers, set(registry.tools))
+    result = await agent.run("\n".join(lines), deps=deps)
     usage.add(result.usage)
     return result.output

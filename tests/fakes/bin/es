@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Fake Elasticsearch CLI for the personal laptop: search and count log indices.
+
+Search output follows the Elasticsearch response (hits.hits[*] with _index, _id, _source).
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import sys
+
+from _fakelib import after, emit, fail, flag, help_or, load, matches, since_arg
+
+HELPS = {
+    "": """es is a command line client for Elasticsearch (fake).
+
+Usage:
+  es [command]
+
+Available Commands:
+  search      Search documents in indices with a query string
+  count       Count documents matching a query string
+  indices     List indices
+  delete      Delete an index
+
+Flags:
+  -h, --help   help for es
+""",
+    "search": """Search documents in indices with a query string.
+
+Usage:
+  es search --index PATTERN [--query QUERY] [--since DURATION] [--size N] [--json]
+
+Examples:
+  es search --index 'logs-*' --query 'level:error AND service:ingestion-gateway' --since 1h --json
+
+Flags:
+      --index string    index name or pattern, e.g. logs-gateway or logs-*
+      --query string    Lucene query string: words, field:value, AND/OR
+      --since string    only documents newer than this, e.g. 15m, 1h, 1d
+      --size int        max hits to return (default 20)
+      --json            print the raw JSON response
+""",
+    "count": """Count documents matching a query string.
+
+Usage:
+  es count --index PATTERN [--query QUERY] [--since DURATION] [--json]
+
+Flags:
+      --index string    index name or pattern
+      --query string    Lucene query string
+      --since string    only documents newer than this, e.g. 1h, 1d
+      --json            print JSON
+""",
+    "indices": """List indices.
+
+Usage:
+  es indices [--json]
+
+Flags:
+      --json   print JSON
+""",
+}
+
+
+def hit_matches(doc: dict, query: str) -> bool:
+    for term in [t for t in query.replace("(", " ").replace(")", " ").split() if t.upper() not in ("AND", "OR")]:
+        if ":" in term:
+            field, value = term.split(":", 1)
+            if str(doc.get(field, "")).lower() != value.strip('"').lower():
+                return False
+        elif not matches(term, doc.get("message"), doc.get("request_id"), doc.get("service")):
+            return False
+    return True
+
+
+def selected(argv: list[str]) -> list[dict]:
+    pattern = flag(argv, "--index", default="*") or "*"
+    query = flag(argv, "--query", default="") or ""
+    start = since_arg(("-" + s) if (s := flag(argv, "--since")) and not s.startswith("-") else s)
+    rows = [r for r in load("es_logs") if fnmatch.fnmatch(r["_index"], pattern) and after(r["ts"], start)]
+    return [r for r in rows if not query or hit_matches(r, query)]
+
+
+if __name__ == "__main__":
+    argv = sys.argv[1:]
+    words = help_or(HELPS, argv, frozenset({"--index", "--query", "--since", "--size"}))
+    if words[:1] == ["search"]:
+        rows = selected(argv)[: int(flag(argv, "--size", default="20") or 20)]
+        hits = [{"_index": r["_index"], "_id": r["_id"],
+                 "_source": {k: v for k, v in r.items() if not k.startswith("_")}} for r in rows]
+        emit({"took": 3, "hits": {"total": {"value": len(hits)}, "hits": hits}})
+    elif words[:1] == ["count"]:
+        emit({"count": len(selected(argv))})
+    elif words[:1] == ["indices"]:
+        names = sorted({r["_index"] for r in load("es_logs")})
+        emit([{"index": n, "docs.count": sum(1 for r in load("es_logs") if r["_index"] == n)} for n in names])
+    elif words[:1] == ["delete"]:
+        fail("error: this fake es never deletes")
+    else:
+        fail(f"unknown command {words[:1]}")

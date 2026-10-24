@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from oracle.exec.executor import Executor, OpResult
+from oracle.registry.jsonpath import get_field
 from oracle.registry.loader import Registry
 from oracle.registry.schema import Example
 
@@ -57,7 +58,7 @@ def check(result: OpResult, example: Example) -> tuple[bool, str]:
     if n < example.expect.min_results:
         return False, f"{n} results, expected at least {example.expect.min_results}"
     for i, record in enumerate(result.records):
-        missing = [f for f in example.expect.has_fields if record.get(f) in (None, "")]
+        missing = [f for f in example.expect.has_fields if get_field(record, f) in (None, "")]
         if missing:
             return False, f"result {i} lacks fields {missing}"
     pages = f", {result.pages} pages" if result.pages > 1 else ""

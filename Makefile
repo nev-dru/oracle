@@ -1,4 +1,4 @@
-.PHONY: build lint test fixtures gate-m1 gate-m2
+.PHONY: build lint test fixtures gate-m1 gate-m2 gate-m3
 
 PY := oracle tests
 FIXTURE_REPO := $(CURDIR)/tests/fakes/acme
@@ -33,4 +33,11 @@ gate-m1: fixtures test
 # M2 gate: all golden cases pass at their level against the home profile. Spends model calls:
 # set ORACLE_MODEL_PLANNER and ORACLE_MODEL_EXTRACT (or [models] in ~/.oracle/config.toml) first.
 gate-m2: fixtures test
+	ORACLE_PROFILE=home uv run --all-extras oracle eval
+
+# M3 gate: ranker top-3 >= 90% on ranker_eval.yaml, every manifest example green, golden still
+# green. The golden part spends model calls (see gate-m2).
+gate-m3: fixtures test
+	ORACLE_PROFILE=home uv run --all-extras oracle tool test
+	ORACLE_PROFILE=home uv run --all-extras oracle tool test --ranker
 	ORACLE_PROFILE=home uv run --all-extras oracle eval

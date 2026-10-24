@@ -1,0 +1,111 @@
+name: argocd
+description: Read-only Argo CD inspection that lists applications (optionally by project), gets one application's
+  sync and health status, and shows its deployment history.
+tags:
+- argocd
+- gitops
+- deployment
+- application
+- sync status
+- deploy history
+- project
+when: Which apps are deployed in Argo CD, whether an app is synced or healthy, or what version was deployed
+  to an app and when.
+not_when: Pods, restarts, events or logs in the cluster right now (use kubectl); tickets, runbooks or
+  design docs (use acli); Teams, mail or meetings (use workiq); source code, symbols or callers (use code-search
+  or code-graph).
+ops:
+- name: app.list
+  when: List Argo CD applications, optionally filtered by project.
+  params:
+    project:
+      desc: project name to filter by, e.g. default
+  argv:
+  - argocd
+  - app
+  - list
+  - -o
+  - json
+  - '{?project:--project=,project}'
+  returns:
+    path: $[*]
+    id_field: metadata.name
+    summary_fields:
+    - metadata.name
+    - metadata.namespace
+    - status.sync.status
+    - status.health.status
+    - status.operationState.finishedAt
+    pointer: argocd:{metadata.name}
+  chains_to:
+  - argocd.app.get
+  - argocd.app.history
+  examples:
+  - expect:
+      min_results: 1
+      has_fields:
+      - metadata.name
+      - metadata.namespace
+      - spec.project
+- name: app.get
+  when: Get details and sync/health status of one named application.
+  params:
+    name:
+      required: true
+      desc: application name, e.g. billing-api
+  argv:
+  - argocd
+  - app
+  - get
+  - '{name}'
+  - -o
+  - json
+  returns:
+    id_field: metadata.name
+    summary_fields:
+    - metadata.name
+    - metadata.namespace
+    - status.sync.status
+    - status.health.status
+    - status.operationState.finishedAt
+    pointer: argocd:{metadata.name}
+  examples:
+  - params:
+      name: billing-api
+    expect:
+      min_results: 1
+      has_fields:
+      - metadata.name
+      - metadata.namespace
+      - spec.project
+- name: app.history
+  when: Show the deployment history of one application (what was deployed and when).
+  params:
+    name:
+      required: true
+      desc: application name, e.g. billing-api
+  argv:
+  - argocd
+  - app
+  - history
+  - '{name}'
+  - -o
+  - json
+  returns:
+    path: $[*]
+    id_field: id
+    summary_fields:
+    - message
+    - author
+    - revision
+    - deployedAt
+    pointer: argocd:{id}
+  examples:
+  - params:
+      name: billing-api
+    expect:
+      min_results: 1
+      has_fields:
+      - id
+      - message
+      - author

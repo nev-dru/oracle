@@ -17,10 +17,14 @@ dependencies = [
 
 [project.scripts]
 oracle = "oracle.cli:main"
+oracle-mcp = "oracle.mcp_server:main"
 
 [project.optional-dependencies]
 claude-code = [
     "claude-agent-sdk>=0.2.174",
+]
+mcp = [
+    "mcp>=2.3.0",
 ]
 
 [build-system]

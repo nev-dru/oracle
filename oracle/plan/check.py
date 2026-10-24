@@ -74,6 +74,7 @@ async def run_check(
     max_steps: int,
     usage: Usage,
     earlier: set[str],
+    guidance: str = "",
 ) -> Check:
     """`earlier` is every step id used so far: plan steps, recipe steps and their stages."""
     lines = [f"Question: {question}"]
@@ -88,6 +89,8 @@ async def run_check(
     else:
         lines.append("No more steps can run: judge completeness and list gaps; next_steps empty.")
     lines += render_shortlist(shortlist, registry)
+    if guidance:
+        lines += ["", guidance]
     deps = CheckContext(registry, shortlist.allowed, max_steps, earlier | {r.step_id for r in runs})
     result = await agent.run("\n".join(lines), deps=deps)
     usage.add(result.usage)

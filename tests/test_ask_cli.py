@@ -29,12 +29,12 @@ async def test_quick_ask_end_to_end(home_cfg: Config, fake_registry: Registry) -
     answer = await ask(req, home_cfg, fake_registry, model)
 
     assert answer.searched == ["acli"] and answer.not_searched == ["workiq"]
-    assert answer.unavailable == ["code-graph", "code-search"]
+    assert {"code-graph", "code-search"} <= set(answer.unavailable)  # inactive in this registry
     assert answer.findings and all(f.pointer.startswith("jira:") for f in answer.findings)
     md = to_markdown(answer)
     for section in ("## Findings", "## Coverage", "## Trace", "Not searched: workiq"):
         assert section in md
-    assert "Not available here: code-graph, code-search" in md
+    assert "Not available here: " in md and "code-graph" in md
     assert json.loads(to_json(answer))["coverage"]["searched"] == ["acli"]
 
     async with open_store(home_cfg.log_path) as store:

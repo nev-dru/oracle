@@ -17,6 +17,7 @@ from rank_bm25 import BM25Plus
 from oracle.registry.loader import Registry
 
 RRF_K = 60
+BREADTH_ALL = 12
 TAG_WEIGHT = 2  # tags are the curated routing words; prose in `when` lines is incidental
 EXACT_BONUS = 1.0
 PREFER_BONUS = 0.5
@@ -144,11 +145,19 @@ class Ranker:
         scope: list[str] | None = None,
         prefer: list[str] | None = None,
         top: int = 5,
+        breadth: bool = False,
     ) -> list[RankedTool]:
+        """Top `top` tools, padded. With `breadth`, every tool while the registry is small
+        (discovery questions name things no tool doc mentions, so a match is a poor filter);
+        past BREADTH_ALL tools, every tool the ranker matched, and at least `top`."""
         if not self.refs:
             return []
         fused, matched = self._bm25_by_tool(self._bm25, query)
         pinned = self._exact(query) | set(scope or [])
+        if breadth:
+            hits = {n for n, score in fused.items() if score > 0} | pinned
+            many = len(self.registry.tools) > BREADTH_ALL
+            top = max(top, len(hits)) if many else len(self.registry.tools)
         fused = self._adjust(fused, pinned, prefer or [], scope, top)
         ranked = [
             RankedTool(

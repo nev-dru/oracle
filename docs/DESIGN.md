@@ -99,7 +99,7 @@ oracle "..." --scope jira        # 1–3 ready-to-run variants
 
 Findings are distilled, never raw. Pointers are stable ids the main agent can hand back to `expand`. Coverage is mandatory: an answer without "Not searched" invites the main agent to assume completeness it does not have. The whole response targets under 1,500 tokens at `standard`; the trace is the only section the main agent may ignore.
 
-**MCP wrapper (milestone 3).** A thin MCP server that shells to the CLI with `--format json` and exposes one `oracle` tool. Nothing in the core depends on it.
+**MCP wrapper (milestone 3).** A thin MCP server that shells to the CLI with `--format json` and exposes one `oracle` tool (and `expand`). Nothing in the core depends on it. Built as `oracle-mcp` (`oracle/mcp_server.py`, the optional `mcp` extra, mcp 2.x): each call is a fresh CLI process, so the server holds no state.
 
 ## Tool registry
 
@@ -184,7 +184,7 @@ Recipes to seed, each a composite op:
 - `code.find_and_expand` = `code-search.search` → `code-graph.expand($1.ids)` → merge. Covers "where does X happen in code". If the search tool's ids are not graph symbol ids, insert `code-graph.symbols_at($1 path:line)` before the expand; verify which applies to `csearch` on the work laptop.
 - `code.trace_path` = `code-graph.find_symbol(a)` ∥ `code-graph.find_symbol(b)` → `code-graph.path_between`. Covers "how A talks to B".
 - `people.profile` = `workiq.people.lookup` ∥ `acli.jira.search(assignee)` ∥ `workiq.teams.search(from)` → merge. Covers "who is X".
-- `today.events` = `workiq.calendar.today` ∥ `acli.jira.search(updated ≥ today)` ∥ `argocd.app.history(today)` ∥ `kubectl.events(since 24h)` ∥ `workiq.teams.search(since today)` → rank by the extractor. Covers "important events from today".
+- `today.events` = `workiq.calendar.today` ∥ `acli.jira.search(updated ≥ today)` ∥ `argocd.app.history(today)` ∥ `kubectl.events(since 24h)` ∥ `workiq.teams.search(since today)` → rank by the extractor. Covers "important events from today". As built at home the deploy and cluster stages are `argocd.app.list` (each app's last operation; `app.history` needs an app name) and Warning-level `kubectl.events` (the ingested op has no time filter), so those two are not bounded to today; distill sees the window and the timestamps, and the check can follow up per app.
 
 These four recipes cover the four seed queries. The planner reaches for a recipe before composing from primitives.
 
@@ -205,9 +205,11 @@ Output: top 3–5 tools with all their ops, which is the range Anthropic's tool 
 
 **Conditioned retrieval on replan.** When the completeness check sends the planner back, the ranker runs again with the original query plus the gap description plus the summary fields of what was found. A result mentioning a Jira key re-ranks `acli` up even if the first query never mentioned tickets.
 
-**Breadth mode.** Everything above a score threshold is returned, not a top-k, and the planner fans out across all of it.
+**Breadth mode.** Everything above a score threshold is returned, not a top-k, and the planner fans out across all of it. As built (`--breadth`, or a breadth recipe or plan): while the registry has 12 tools or fewer, breadth hands the planner every tool, because discovery questions name things ("the ingestion gateway") that no tool doc mentions, so a lexical match is a poor filter; past 12, every matched tool and at least five.
 
-**Evaluation.** `ranker_eval.yaml` holds query → expected tools. `oracle tool test --ranker` reports top-1 and top-3 hit rates. Manifest `when` text is tuned against this file, not by intuition.
+**Scoring as built.** BM25Plus rather than BM25Okapi, counting only documents that share a word with the query: with BM25Okapi a word in half the documents weighs zero and one or two recipes never match, which is exactly the state of a registry filled one tool at a time. Tags weigh double; "who" is not a stopword (it routes to people sources).
+
+**Evaluation.** `ranker_eval.yaml` holds query → expected tools. `oracle tool test --ranker` reports top-1 and top-3 hit rates. Manifest `when` text is tuned against this file, not by intuition. A hit counts only tools the ranker matched or pinned, never padding. The 35 cases were written before the kubectl, argocd, es and mongo manifests existed and cover the boundary pairs (kubectl/argocd, es/kubectl logs, es/mongo, code-search/code-graph, acli/workiq); first run with the ingested manifests, untuned: top-1 89%, top-3 97%.
 
 ## Planner and executor
 
@@ -333,7 +335,7 @@ Every invocation writes one record to `~/.oracle/log.sqlite`; the record is the 
 | `pointers` | session, pointer, call\_id, expanded\_at |
 | `feedback` | call\_id, source (agent or human), useful, note, ts |
 
-**Implicit signals**, derived nightly by `oracle report`:
+**Implicit signals**, derived nightly by `oracle report` (built in M3: re-asks within 2 minutes, expanded pointers, calls that replanned twice, ranker misses, failing ops and feedback; ranker misses are written to `~/.oracle/report/ranker_candidates.yaml` for review, never into `ranker_eval.yaml`):
 
 - Re-query within 2 minutes in the same session with a reworded question: the first answer missed.
 - `expand` on a pointer: the finding was used.
@@ -377,7 +379,9 @@ oracle/
   registry/
     schema.py       # pydantic models for manifests, ops, returns, recipes
     loader.py       # reads registry/tools/*.yaml, validates, caches
-    importers/      # openapi.py, mcp.py, graphql.py, cli_draft.py (Sonnet-assisted)
+    importers/      # cli_probe.py, cli_draft.py, mcp_import.py, infer.py (M3); openapi.py, graphql.py later
+    safety.py       # mutating-verb check on argv and MCP tool names (load, probe, draft, verify)
+    jsonpath.py     # the JSONPath subset, and dotted field access (metadata.name)
     codegen.py      # emits oracle_tools/<tool>.py from manifests
   rank/
     index.py        # op documents, BM25, optional embeddings, RRF
@@ -409,6 +413,9 @@ oracle/
     ingest.py       # the tool ingestion workflow (probe, draft, verify, boundaries, evals, review)
   skills/
     loader.py       # role-static, tool-scoped, query-ranked skill selection
+  mcp_server.py     # oracle-mcp: the oracle as one MCP tool (optional `mcp` extra)
+  exec/runners/mcp.py  # call a tool on a stdio MCP server
+skills/<name>/SKILL.md  # the skills themselves
   prompts/          # planner.md, check.md, distill.md, script.md
   llm/
     claude_code.py  # claude-code:<alias> PydanticAI model over claude-agent-sdk (the subscription)
@@ -425,7 +432,7 @@ tests/            # unit tests per module + golden runner
   fakes/            # fake acli and workiq CLIs, their fixtures, and the acme fixture code repo
 ```
 
-`uv` for packaging, `typer` for the CLI, `pydantic-ai` (as `pydantic-ai-slim[openai,anthropic]`) for the three agents, `rank_bm25` and optional `sentence-transformers` for ranking, `aiosqlite` for caches and logs, `pyyaml` for manifests, and `claude-agent-sdk` as the optional `claude-code` extra for the home model route. JSONPath is a hand-written subset (`$`, `.key`, `['key']`, `[n]`, `[*]`) in `registry/jsonpath.py`, so manifests are checked at load time. One process, asyncio throughout. Dev-only dependencies (a \`dev\` dependency group in \`pyproject.toml\`, never shipped): \`pytest\`, \`pytest-asyncio\`, \`ruff\`, \`pyright\`, \`radon\` or \`xenon\`, \`vulture\`, driven by a Makefile whose \`make lint\` runs lint, type, complexity, maintainability and dead-code checks and \`make test\` runs the suite and the golden set.
+`uv` for packaging, `typer` for the CLI, `pydantic-ai` (as `pydantic-ai-slim[openai,anthropic]`) for the three agents, `rank_bm25` and optional `sentence-transformers` for ranking, `aiosqlite` for caches and logs, `pyyaml` for manifests, `claude-agent-sdk` as the optional `claude-code` extra for the home model route, and `mcp` (the official Python SDK, 2.x) as the optional `mcp` extra for the MCP wrapper and MCP import (approved 2026-10-24). JSONPath is a hand-written subset (`$`, `.key`, `['key']`, `[n]`, `[*]`) in `registry/jsonpath.py`, so manifests are checked at load time. One process, asyncio throughout. Dev-only dependencies (a \`dev\` dependency group in \`pyproject.toml\`, never shipped): \`pytest\`, \`pytest-asyncio\`, \`ruff\`, \`pyright\`, \`radon\` or \`xenon\`, \`vulture\`, driven by a Makefile whose \`make lint\` runs lint, type, complexity, maintainability and dead-code checks and \`make test\` runs the suite and the golden set.
 
 &#91;embedded content: milestones · 4 phases, 4 gates\]
 
@@ -438,6 +445,8 @@ The same plan as a table, for exports that drop the drawing:
 | M1 Core | Registry schema and loader; ranker (exact name + BM25); executor with argv runner, pagination, caps, pointers; manifests for code-search, code-graph, acli, workiq; `quick` tier; `oracle expand`; log schema | `oracle tool test` passes every manifest example; unit tests green |
 | M2 Standard | Planner (Plan DAG), recipes (the four seeded), completeness check, distill, Coverage/Refine/Trace output; `standard` tier; feedback command; plan-level breadth and grouping (pulled forward from M3) | `oracle eval` passes all four golden cases at `standard` |
 | M3 Scale | Remaining manifests (kubectl, argocd, es, mongo, custom scripts); breadth mode; `oracle report` implicit signals; ingestion workflow (`oracle tool add`); skills loader; MCP wrapper; environment profiles | `oracle tool test --ranker` top-3 hit rate at or above 90% on `ranker_eval.yaml`; golden set still green |
+
+M3 as built (2026-10-24): kubectl, argocd, es and mongo were added at home through `oracle tool add` against fakes, not hand-written; custom scripts are left until a seed query needs one; environment profiles shipped in M1. Ingestion has the CLI and MCP import paths; OpenAPI and GraphQL are deferred, as is registering ingestion as a workflow (M4). Gate: ranker top-3 97% (35 cases), 26/26 manifest examples, golden 4/4 with all 8 tools (about 16 s and 22K sub-agent tokens per case).
 | M4 Deep | Codegen of `oracle_tools`; `oracle.sdk` (extract, fan_out, summarize, crawl, budget); the crawl with `--depth` and `--budget`; script agent and runner with v1 isolation; `deep` tier; workflow protocol and recursion guard; dreaming workflow after a few weeks of logs; container only if deep calls are frequent | One deep-tier script or crawl chain promoted to a recipe through the logs; the crawl acceptance case passes (if adopted); golden set still green |
 
 ### Developing on the personal laptop
@@ -470,6 +479,15 @@ Stage 6 is the one stage not to automate away. `when` text is what decides tool 
 
 **Failure handling.** No `--json` and no parseable table: the op gets `returns.format: text` and a note; the user can add a parser later. Interactive or prompting tool: refuse with a suggested wrapper script skeleton. Auth missing: the manifest is written with `auth.env` filled in and the tool is left inactive until the variable exists.
 
+**As built in M3.**
+
+- **Safety before anything runs.** A deterministic mutating-verb check (`registry/safety.py`: delete, create, apply, sync, rollback, index, drop, manage and so on) refuses ops at load, at draft, and before verification. The probe never runs a mutating subcommand, not even with `--help`, because some CLIs execute it anyway. Every literal word of the template is checked, so flags placed before a subcommand (`kubectl -n prod delete`, `argocd --server x app sync`) do not hide it, and inline code (`sh -c`, `python -c`, `mongosh --eval`, a writing SQL statement) is refused. The executor and the planner's validation also check the command exactly as it will run: a positional word equal to a mutating verb is refused, which catches a param in any subcommand slot (`argocd app {action}`) and a literal inside a conditional (`{?yes:delete}`); flag values, multi-word items and names such as `user-sync-worker` are data. Known limit: a boolean flag followed by a verb param (`kubectl -A {verb}`) reads like a flag and its value, so that shape relies on the static check and review. Verb matching splits snake_case, kebab-case, camelCase and dotted names (`deleteProject`, `issues.delete`). MCP tools are refused by the server's hints (`read_only_hint`, `destructive_hint`) or by name; a hint can add a refusal but never lift one. Before any draft exists, only argument-free tools named with a read verb (list, get, search, find, query, show, describe, read, count) are called to sample their output, because a denylist cannot be complete. Each import path drafts one transport: a CLI draft cannot carry an `mcp` server block, and an MCP repair cannot switch to argv. A short identifier naming secrets (`secret`, `secret/db-creds`, `secrets,configmaps`) is refused for every op, while prose that mentions secrets is data; JSON params may not contain server-side code operators (`$where`, `$function`, `$accumulator`). Activation repeats the loader's checks on the staged manifest, so a review edit cannot install something the loader would refuse. The check errs on the safe side: `kubectl rollout status` and codebase-memory's `index_status` are refused although read-only.
+- **The probe is bounded.** Depth 3, 40 commands, 60K characters of help; a subcommand that prints the same help again is not recursed (some CLIs ignore unknown subcommands).
+- **Verification grounds `returns`.** Each example runs once with `path: $` to see the whole document; `returns` (record list, id field, summary fields, pointer, dotted names into nested JSON such as `status.sync.status`) is inferred from it, and the example's expectations are taken from what came back. A failing op gets one repair, shown real records from ops that already work, so it can use a real id. An op whose example returns nothing is kept but flagged and blocks `--yes` (`vex status` writes to stderr, which the oracle never reads).
+- **Review is a staged directory**, `~/.oracle/ingest/<name>/` (probe.json, draft.yaml, manifest.yaml, boundary.md, eval_candidates.yaml, report.md). `oracle tool activate <name>` is a second, deliberate command and never overwrites an existing manifest. `--yes` activates only when every op verified with results, no ranker case was taken from another tool, and no edit to another tool was proposed. Proposals for existing tools are written to boundary.md and never applied. Eval candidates go to their own file, never into golden.yaml or ranker_eval.yaml.
+- **Measured at home.** Each ingestion took 3 to 7 model calls and 40 to 60 s. vex: 3 of 3 ops kept after two fixes, matching the hand-written code-search manifest's argv, record path, id and pointer. kubectl: 3 of 4 kept (`describe` dropped), `create`, `run` and `delete` refused unprobed. argocd: 3 of 3 kept, `sync`, `rollback`, `delete` and `login` refused. es and mongo: 3 of 3 each. The real codebase-memory-mcp server: 8 tools kept, 5 refused, flagged for review because it overlaps code-graph. Hand edits made in review: kubectl's `all_namespaces` default set to false; argocd's summary fields recomputed after the inference was extended to deeper nesting.
+- **Shell history** is not read in M3.
+
 **Cost.** One ingestion is a workflow of roughly 10–30 model calls plus as many tool runs as there are examples. Minutes, not seconds, which is fine for something that happens once per tool. It is itself registered as a workflow (next sections), so it uses the same budget and logging as everything else.
 
 ## Skills for the oracle's agents
@@ -499,6 +517,8 @@ Tool-scoped skills are the high-value kind. Wrong or borrowed parameters are a d
 **Presentation skills stay with the main agent.** A diagramming skill or a report-formatting skill belongs to whoever renders for the user, and the oracle does not. Its output contract is fixed (Findings, Coverage, Refine, Trace) so that the main agent can rely on it; a skill that changed the shape per call would break that. The one presentation skill the oracle owns is `findings-format`, which defines that contract.
 
 **Budget.** Each loaded skill is capped at \~800 tokens; the planner sees at most four (one static, up to two tool-scoped, one query-ranked). `oracle eval` runs with and without each new skill before it is kept, so a skill that does not change results is removed rather than carried.
+
+**As built in M3.** `oracle/skills/loader.py` reads `skills/<name>/SKILL.md`, with frontmatter `applies_to` (planner, check, ingest), `scope` (`role`, `tool:<name>`, `query`) and `when`; manifests may attach skills with `skills: [...]`. Shipped: jql, cql, es-query, mongo-filter, kubectl-selectors (tool-scoped), incident-triage and people-lookup (query-ranked; people-lookup carries the first-name rule), and manifest-authoring (role-static for ingest). The planner and the check get the selected skills appended to their request; the trace notes which were used. The with-and-without eval per skill is not automated yet.
 
 ## Workflows as tools, and the recursion guard
 

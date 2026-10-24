@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Fake kubectl for the personal laptop: pods, deployments, events, logs over fixtures.
+
+Output follows real kubectl JSON (items with metadata and status). Mutating commands refuse.
+"""
+
+from __future__ import annotations
+
+import sys
+
+from _fakelib import emit, fail, flag, help_or, load
+
+HELPS = {
+    "": """kubectl controls the Kubernetes cluster manager (fake).
+
+Basic Commands (Beginner):
+  create          Create a resource from a file or from stdin
+  run             Run a particular image on the cluster
+
+Basic Commands (Intermediate):
+  get             Display one or many resources
+  delete          Delete resources by file names, stdin, resources and names, or by label selector
+
+Troubleshooting and Debugging Commands:
+  describe        Show details of a specific resource or group of resources
+  logs            Print the logs for a container in a pod
+  events          List events
+
+Usage:
+  kubectl [flags] [options]
+""",
+    "get": """Display one or many resources.
+
+ Resource types: pods (po), deployments (deploy), events (ev), namespaces (ns).
+
+Examples:
+  # List all pods in the payments namespace in JSON
+  kubectl get pods -n payments -o json
+
+  # List pods with a label selector across all namespaces
+  kubectl get pods -A -l app=ingestion-gateway -o json
+
+Options:
+    -A, --all-namespaces=false: If present, list the requested object(s) across all namespaces.
+    -l, --selector='': Selector (label query) to filter on, e.g. -l app=billing-api
+    -n, --namespace='': The namespace scope for this request.
+    -o, --output='': Output format. One of: (json, wide, name).
+
+Usage:
+  kubectl get [(-o|--output=)json] (TYPE [NAME | -l label] | TYPE/NAME ...) [flags] [options]
+""",
+    "events": """List events.
+
+Examples:
+  # List recent events in the billing namespace in JSON
+  kubectl events -n billing -o json
+
+  # Events for one object
+  kubectl events -n payments --for pod/payments-api-7d9f-x2k -o json
+
+Options:
+    -A, --all-namespaces=false: If present, list the requested object(s) across all namespaces.
+    --for='': Filter events to only those pertaining to the specified resource.
+    -n, --namespace='': The namespace scope for this request.
+    -o, --output='': Output format. One of: (json).
+    --types='': Output only events of given types, e.g. Warning.
+
+Usage:
+  kubectl events [(-o|--output=)json] [--for TYPE/NAME] [flags] [options]
+""",
+    "logs": """Print the logs for a container in a pod.
+
+Examples:
+  # Return the last 50 lines from a pod
+  kubectl logs ingestion-gateway-6f4-a1b -n prod --tail=50
+
+Options:
+    -n, --namespace='': The namespace scope for this request.
+    --since=0s: Only return logs newer than a relative duration like 5s, 2m, or 3h.
+    --tail=-1: Lines of recent log file to display.
+
+Usage:
+  kubectl logs [-f] [-p] POD [-c CONTAINER] [flags] [options]
+""",
+    "describe": """Show details of a specific resource.
+
+Examples:
+  kubectl describe pod payments-api-7d9f-x2k -n payments
+
+Usage:
+  kubectl describe (-f FILENAME | TYPE [NAME_PREFIX | -l label] | TYPE/NAME) [options]
+""",
+}
+KINDS = {"pod": "Pod", "pods": "Pod", "po": "Pod", "deployment": "Deployment", "deployments": "Deployment",
+         "deploy": "Deployment", "secret": "Secret", "secrets": "Secret", "namespaces": "Namespace", "ns": "Namespace"}
+
+
+def scoped(rows: list[dict], argv: list[str]) -> list[dict]:
+    if "-A" in argv or "--all-namespaces" in argv:
+        return rows
+    ns = flag(argv, "-n", "--namespace", default="default")
+    return [r for r in rows if r.get("namespace") == ns]
+
+
+def as_k8s(row: dict) -> dict:
+    meta = {"name": row["name"], "namespace": row["namespace"], "uid": f"uid-{row['name']}",
+            "labels": row.get("labels", {}), "creationTimestamp": row.get("started")}
+    if row["kind"] == "Pod":
+        status = {"phase": row["phase"], "reason": row["reason"], "ready": row["ready"], "restarts": row["restarts"]}
+        return {"kind": "Pod", "metadata": meta, "spec": {"nodeName": row["node"]}, "status": status}
+    if row["kind"] == "Deployment":
+        return {"kind": "Deployment", "metadata": meta, "spec": {"replicas": row["replicas"], "image": row["image"]},
+                "status": {"availableReplicas": row["available"]}}
+    return {"kind": row["kind"], "metadata": meta, "data": row.get("data", {})}
+
+
+def get(words: list[str], argv: list[str]) -> None:
+    if len(words) < 2:
+        fail("error: you must specify the type of resource to get")
+    kind = KINDS.get(words[1].split("/")[0])
+    if kind is None and words[1] in ("events", "ev"):
+        return events(argv)
+    if kind is None:
+        fail(f'error: the server doesn\'t have a resource type "{words[1]}"')
+    rows = [r for r in scoped(load("k8s"), argv) if r["kind"] == kind]
+    selector = flag(argv, "-l", "--selector")
+    if selector and "=" in selector:
+        key, value = selector.split("=", 1)
+        rows = [r for r in rows if r.get("labels", {}).get(key) == value]
+    if len(words) > 2:
+        rows = [r for r in rows if r["name"] == words[2]]
+    emit({"apiVersion": "v1", "kind": "List", "items": [as_k8s(r) for r in rows]})
+
+
+def events(argv: list[str]) -> None:
+    rows = scoped(load("k8s_events"), argv)
+    target = flag(argv, "--for")
+    if target:
+        rows = [r for r in rows if r["object"] == target]
+    kinds = flag(argv, "--types")
+    if kinds:
+        rows = [r for r in rows if r["type"] in kinds.split(",")]
+    items = [{"metadata": {"name": f"{r['object'].split('/')[1]}.{i}", "namespace": r["namespace"], "uid": f"ev-{i}"},
+              "type": r["type"], "reason": r["reason"], "message": r["message"], "count": r["count"],
+              "lastTimestamp": r["last"], "involvedObject": {"kind": r["object"].split("/")[0], "name": r["object"].split("/")[1]}}
+             for i, r in enumerate(rows)]
+    emit({"apiVersion": "v1", "kind": "List", "items": items})
+
+
+def logs(words: list[str], argv: list[str]) -> None:
+    if len(words) < 2:
+        fail("error: expected 'logs POD'")
+    for entry in load("k8s_logs"):
+        if entry["pod"] == words[1]:
+            tail = int(flag(argv, "--tail", default="-1") or -1)
+            lines = entry["lines"][-tail:] if tail > 0 else entry["lines"]
+            sys.stdout.write("\n".join(lines) + "\n")
+            return
+    fail(f'error: pods "{words[1]}" not found')
+
+
+def describe(words: list[str], argv: list[str]) -> None:
+    rows = [r for r in scoped(load("k8s"), argv) if len(words) > 2 and r["name"].startswith(words[2])]
+    for r in rows:
+        sys.stdout.write(f"Name: {r['name']}\nNamespace: {r['namespace']}\nKind: {r['kind']}\n"
+                         f"Status: {r.get('phase', '')} {r.get('reason', '')}\nRestarts: {r.get('restarts', 0)}\n\n")
+    if not rows:
+        fail("error: no objects found")
+
+
+if __name__ == "__main__":
+    argv = sys.argv[1:]
+    words = help_or(HELPS, argv, frozenset({"-n", "--namespace", "-l", "--selector", "-o", "--output", "--for", "--types", "--since", "--tail", "-c"}))
+    commands = {"get": get, "logs": logs, "describe": describe}
+    if words and words[0] == "events":
+        events(argv)
+    elif words and words[0] in commands:
+        commands[words[0]](words, argv)
+    elif words and words[0] in ("create", "run", "delete", "apply"):
+        fail("error: this fake kubectl never changes the cluster")
+    else:
+        fail(f"error: unknown command {words[:1]}")

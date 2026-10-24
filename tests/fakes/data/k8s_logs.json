@@ -1,0 +1,5 @@
+[
+  {"pod": "ingestion-gateway-6f4-a1b", "lines": ["INFO batch window opened source=salesforce", "WARN upstream slow p99=4.2s", "ERROR request req-abc123 timed out after 30s", "ERROR 503 returned to salesforce connector"]},
+  {"pod": "payments-api-7d9f-x2k", "lines": ["INFO starting payments-api 2.1.0", "FATAL missing env PAYMENTS_DB_URL", "INFO exiting with code 1"]},
+  {"pod": "billing-api-5b8-r7t", "lines": ["INFO billing-api 3.8.0 ready"]}
+]

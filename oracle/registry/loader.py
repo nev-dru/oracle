@@ -12,6 +12,7 @@ import yaml
 from pydantic import ValidationError
 
 from oracle.registry.params import ParamError, validate_shape
+from oracle.registry.safety import op_problem
 from oracle.registry.schema import Op, Recipe, Tool
 
 
@@ -140,17 +141,32 @@ def _load_one(path: Path, reg: Registry) -> Tool | None:
     if tool.name != path.stem:
         reg.problems.append(f"{path.name}: name {tool.name!r} does not match the file name")
         return None
+    tool = _read_only_part(tool, path, reg)
+    if tool is not None and (problem := _refusal(tool)):
+        reg.problems.append(f"{path.name}: {problem}")
+        return None
+    return tool
+
+
+def _read_only_part(tool: Tool, path: Path, reg: Registry) -> Tool | None:
+    """Honest declarations are respected: a mutating tool is refused, mutating ops are dropped,
+    each with a note, and the rest of the tool still loads."""
     if tool.mutating:
         reg.notes.append(f"{path.name}: refused, the tool is marked mutating (read-only oracle)")
         return None
     dropped = [op.name for op in tool.ops if op.mutating]
-    if dropped:
-        reg.notes.append(f"{path.name}: dropped mutating ops {dropped}")
-        kept = [op for op in tool.ops if not op.mutating]
-        if not kept:
-            return None
-        tool = tool.model_copy(update={"ops": kept})
-    return tool
+    if not dropped:
+        return tool
+    reg.notes.append(f"{path.name}: dropped mutating ops {dropped}")
+    kept = [op for op in tool.ops if not op.mutating]
+    return tool.model_copy(update={"ops": kept}) if kept else None
+
+
+def _refusal(tool: Tool) -> str | None:
+    """An op declared read-only whose command says otherwise: never load the tool."""
+    unsafe = {op.name: p for op in tool.ops if (p := op_problem(op.argv, op.mcp_tool, op.params))}
+    # declared read-only, but the argv says otherwise: never load it
+    return f"refused, {unsafe}" if unsafe else None
 
 
 def _check_references(reg: Registry, loaded: list[Tool]) -> None:

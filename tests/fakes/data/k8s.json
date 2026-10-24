@@ -1,0 +1,11 @@
+[
+  {"kind": "Pod", "namespace": "payments", "name": "payments-api-7d9f-x2k", "phase": "Running", "ready": "0/1", "reason": "CrashLoopBackOff", "restarts": 14, "node": "node-3", "labels": {"app": "payments-api"}, "started_offset_h": -5},
+  {"kind": "Pod", "namespace": "payments", "name": "payments-worker-55c-q8z", "phase": "Running", "ready": "1/1", "reason": "", "restarts": 0, "node": "node-1", "labels": {"app": "payments-worker"}, "started_offset_h": -50},
+  {"kind": "Pod", "namespace": "prod", "name": "ingestion-gateway-6f4-a1b", "phase": "Running", "ready": "1/1", "reason": "", "restarts": 2, "node": "node-2", "labels": {"app": "ingestion-gateway"}, "started_offset_h": -6},
+  {"kind": "Pod", "namespace": "prod", "name": "ingestion-gateway-6f4-c3d", "phase": "Running", "ready": "1/1", "reason": "", "restarts": 1, "node": "node-4", "labels": {"app": "ingestion-gateway"}, "started_offset_h": -6},
+  {"kind": "Pod", "namespace": "billing", "name": "billing-api-5b8-r7t", "phase": "Running", "ready": "1/1", "reason": "", "restarts": 0, "node": "node-2", "labels": {"app": "billing-api"}, "started_offset_h": -3},
+  {"kind": "Deployment", "namespace": "prod", "name": "ingestion-gateway", "replicas": 2, "available": 2, "image": "registry/ingestion-gateway:1.14.2", "started_offset_h": -6},
+  {"kind": "Deployment", "namespace": "billing", "name": "billing-api", "replicas": 1, "available": 1, "image": "registry/billing-api:3.8.0", "started_offset_h": -3},
+  {"kind": "Deployment", "namespace": "payments", "name": "payments-api", "replicas": 1, "available": 0, "image": "registry/payments-api:2.1.0", "started_offset_h": -5},
+  {"kind": "Secret", "namespace": "prod", "name": "gateway-token", "data": {"token": "c2VjcmV0LXZhbHVl"}, "started_offset_h": -900}
+]

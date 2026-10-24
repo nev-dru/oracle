@@ -8,6 +8,7 @@ from oracle.exec.bindings import BindingError, binding_refs
 from oracle.exec.runners.argv import ArgvError, LeadingDashError, build_argv
 from oracle.registry.loader import Registry
 from oracle.registry.params import ParamError, validate_shape
+from oracle.registry.safety import rendered_problem
 
 
 class Step(BaseModel):
@@ -78,7 +79,9 @@ def _param_errors(step: Step, registry: Registry) -> list[str]:
             validate_shape(recipe, step.params)
             return []
         op = registry.resolve(step.op)[1]
-        build_argv(op.argv, validate_shape(op, step.params))
+        argv, _ = build_argv(op.argv, validate_shape(op, step.params))
+        if problem := rendered_problem(argv):  # the executor refuses it; let the planner fix it
+            return [problem]
     except LeadingDashError as exc:  # the same checks the executor runs, worded for the planner
         return [f"param {exc.name!r} cannot start with '-'; rephrase {exc.value!r} or omit it"]
     except (ParamError, ArgvError) as exc:

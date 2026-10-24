@@ -15,7 +15,7 @@ NAME = r"^[a-z][a-z0-9-]*$"
 OP_NAME = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$"
 PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
 
-ParamType = Literal["str", "int", "bool", "list[str]", "json"]
+ParamType = Literal["str", "int", "float", "bool", "list[str]", "json"]
 
 
 class Strict(BaseModel):
@@ -69,7 +69,10 @@ class Op(Strict):
     name: str = Field(pattern=OP_NAME)
     when: str
     params: dict[str, Param] = Field(default_factory=dict)
-    argv: list[str] = Field(min_length=1)
+    argv: list[str] = Field(default_factory=list, description="the command, for a CLI tool")
+    mcp_tool: str | None = Field(
+        default=None, description="the MCP tool to call, for a tool with an `mcp` server"
+    )
     returns: Returns = Field(default_factory=Returns)
     paginate: Paginate | None = None
     chains_to: list[str] = Field(default_factory=list)
@@ -78,6 +81,8 @@ class Op(Strict):
 
     @model_validator(mode="after")
     def _placeholders_are_params(self) -> "Op":
+        if bool(self.argv) == bool(self.mcp_tool):
+            raise ValueError("an op has exactly one of argv (a CLI) or mcp_tool (an MCP tool)")
         known = set(self.params) | ({self.paginate.param} if self.paginate else set())
         for item in self.argv:
             for ref in placeholder_params(item):
@@ -88,6 +93,13 @@ class Op(Strict):
 
 class Auth(Strict):
     env: list[str] = Field(default_factory=list)
+
+
+class McpServer(Strict):
+    """A stdio MCP server; its tools become ops with `mcp_tool` instead of argv."""
+
+    command: str
+    args: list[str] = Field(default_factory=list)
 
 
 class Limits(Strict):
@@ -105,7 +117,16 @@ class Tool(Strict):
     auth: Auth = Field(default_factory=Auth)
     limits: Limits = Field(default_factory=Limits)
     mutating: bool = False
+    skills: list[str] = Field(default_factory=list, description="tool-scoped skills to attach")
+    mcp: McpServer | None = None
     ops: list[Op] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _transport_matches(self) -> "Tool":
+        wrong = [op.name for op in self.ops if bool(op.mcp_tool) != bool(self.mcp)]
+        if wrong:
+            raise ValueError(f"ops {wrong}: use mcp_tool exactly when the tool has an mcp server")
+        return self
 
     @model_validator(mode="after")
     def _unique_ops(self) -> "Tool":

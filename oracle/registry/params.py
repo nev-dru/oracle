@@ -74,11 +74,71 @@ def _bool(value: Any) -> bool:
     raise ValueError(value)
 
 
-_COERCE = {"str": str, "int": _int, "bool": _bool, "list[str]": _list, "json": _json}
+def _float(value: Any) -> float:
+    if isinstance(value, bool):
+        raise TypeError(value)
+    return float(value)
+
+
+_COERCE = {
+    "str": str,
+    "int": _int,
+    "float": _float,
+    "bool": _bool,
+    "list[str]": _list,
+    "json": _json,
+}
+
+
+# `kubectl get secrets` and friends return credentials; no op may ask for them by name
+DENIED_VALUES = frozenset({"secret", "secrets"})
+
+
+CODE_OPERATORS = frozenset({"$where", "$function", "$accumulator", "$eval"})
+
+
+def _denied(value: Any) -> bool:
+    """A secrets resource named in a short identifier (`secret`, `secret/db-creds`,
+    `secrets,configmaps`, `Secret.v1`). Prose with spaces is data, so a search for "where do
+    we store secrets" passes."""
+    values = value if isinstance(value, list) else [value]
+    return any(
+        isinstance(v, str)
+        and len(v.split()) == 1
+        and bool(set(re.split(r"[/,.:]", v.strip().lower())) & DENIED_VALUES)
+        for v in values
+    )
+
+
+def _code_operator(value: Any) -> str | None:
+    """Mongo-style operators that run server-side code, anywhere in a JSON param."""
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            if key in CODE_OPERATORS:
+                return key
+            if found := _code_operator(inner):
+                return found
+    if isinstance(value, list):
+        return next((f for v in value if (f := _code_operator(v))), None)
+    return None
+
+
+def _refuse_unsafe(name: str, value: Any) -> None:
+    """Values no op may send, whatever its manifest says: secrets and server-side code."""
+    if _denied(value):
+        raise ParamError(f"param {name!r}: reading secrets is refused")
+    if op := _code_operator(value):
+        raise ParamError(f"param {name!r}: {op} runs code on the server and is refused")
+
+
+def _text(value: Any) -> str:
+    """How an enum value is written in a manifest: `true`, `2`, `callers`."""
+    return str(value).lower() if isinstance(value, bool) else str(value)
 
 
 def _check(name: str, spec: Param, value: Any) -> Any:
-    if spec.enum is not None and value not in spec.enum:
+    _refuse_unsafe(name, value)
+    if spec.enum is not None and value not in spec.enum and _text(value) not in spec.enum:
         raise ParamError(f"param {name!r} must be one of {spec.enum}, got {value!r}")
     if spec.max is not None and isinstance(value, int) and value > spec.max:
         raise ParamError(f"param {name!r} must be at most {spec.max}, got {value}")
@@ -88,7 +148,14 @@ def _check(name: str, spec: Param, value: Any) -> Any:
 
 
 TEMPLATE = re.compile(r"^\$|\{[a-z_]+\}")
-_DUMMY: dict[str, Any] = {"str": "x", "int": 1, "bool": True, "list[str]": ["x"], "json": {}}
+_DUMMY: dict[str, Any] = {
+    "str": "x",
+    "int": 1,
+    "float": 1.0,
+    "bool": True,
+    "list[str]": ["x"],
+    "json": {},
+}
 
 
 def is_deferred(value: Any) -> bool:

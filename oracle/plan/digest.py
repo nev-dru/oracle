@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from oracle.exec.dag import StepRun
+from oracle.registry.jsonpath import get_field
 from oracle.registry.loader import Registry
 
 DATA_OPEN = "<data>"
@@ -25,7 +26,9 @@ def defang(text: str) -> str:
 
 def summary_of(record: dict[str, Any], fields: list[str], chars: int = 160) -> str:
     keys = fields or list(record)[:4]
-    parts = [f"{k}={record[k]}" for k in keys if record.get(k) not in (None, "", [])]
+    parts = [
+        f"{k}={get_field(record, k)}" for k in keys if get_field(record, k) not in (None, "", [])
+    ]
     text = defang(" ".join("; ".join(parts).split()) or json.dumps(record, default=str))
     return text if len(text) <= chars else text[: chars - 1] + "…"
 

@@ -1,0 +1,10 @@
+[
+  {"name": "billing-api", "namespace": "billing", "project": "platform", "sync": "Synced", "health": "Degraded", "revision": "a1f9c2e", "repo": "git@example.com:platform/billing-api.git", "history": [
+    {"id": 41, "revision": "a1f9c2e", "deployed_offset_h": -3.2, "author": "Priya Raman", "message": "billing-api 3.9.0: new tax rounding", "result": "rolled back after failed health check"},
+    {"id": 40, "revision": "9b7d011", "deployed_offset_h": -52, "author": "Priya Raman", "message": "billing-api 3.8.0", "result": "succeeded"}]},
+  {"name": "ingestion-gateway", "namespace": "prod", "project": "platform", "sync": "Synced", "health": "Healthy", "revision": "c44e7aa", "repo": "git@example.com:platform/ingestion-gateway.git", "history": [
+    {"id": 18, "revision": "c44e7aa", "deployed_offset_h": -6.1, "author": "Sam Ortiz", "message": "gateway 1.14.2: raise batch buffer", "result": "succeeded"},
+    {"id": 17, "revision": "70be3d2", "deployed_offset_h": -170, "author": "Sam Ortiz", "message": "gateway 1.14.1", "result": "succeeded"}]},
+  {"name": "payments-api", "namespace": "payments", "project": "payments", "sync": "OutOfSync", "health": "Missing", "revision": "f00ba11", "repo": "git@example.com:payments/payments-api.git", "history": [
+    {"id": 7, "revision": "f00ba11", "deployed_offset_h": -5.2, "author": "Dana Kim", "message": "payments-api 2.1.0: move to new db", "result": "succeeded"}]}
+]

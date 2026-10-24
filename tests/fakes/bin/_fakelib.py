@@ -20,15 +20,64 @@ NOW = datetime.now().astimezone()
 
 
 def load(name: str) -> list[dict]:
-    rows = json.loads((DATA / f"{name}.json").read_text())
+    return stamp(json.loads((DATA / f"{name}.json").read_text()))
+
+
+def load_map(name: str) -> dict[str, list[dict]]:
+    """A fixture holding several named row lists (Mongo collections)."""
+    return {k: stamp(v) for k, v in json.loads((DATA / f"{name}.json").read_text()).items()}
+
+
+def positional(argv: list[str], value_flags: frozenset[str]) -> list[str]:
+    """Words that are not flags or the values of flags that take one."""
+    words, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+        elif a.startswith("-"):
+            skip = a in value_flags
+        else:
+            words.append(a)
+    return words
+
+
+def help_or(
+    helps: dict[str, str], argv: list[str], value_flags: frozenset[str] = frozenset()
+) -> list[str]:
+    """Cobra-style CLIs: print the help for the deepest known subcommand path when -h/--help is
+    given, else return the words to dispatch on."""
+    words = positional(argv, value_flags)
+    if "-h" in argv or "--help" in argv or not argv:
+        for n in range(len(words), -1, -1):
+            key = " ".join(words[:n])
+            if key in helps:
+                sys.stdout.write(helps[key])
+                raise SystemExit(0)
+    return words
+
+
+def flag(argv: list[str], *names: str, default: str | None = None) -> str | None:
+    """`--name value`, `--name=value` or `-n value`."""
+    for i, a in enumerate(argv):
+        for name in names:
+            if a == name and i + 1 < len(argv):
+                return argv[i + 1]
+            if a.startswith(name + "="):
+                return a.split("=", 1)[1]
+    return default
+
+
+def stamp(rows: list[dict]) -> list[dict]:
     for row in rows:
+        for nested in [v for v in row.values() if isinstance(v, list)]:
+            stamp([x for x in nested if isinstance(x, dict)])
         for key in [k for k in row if k.endswith("_offset_h")]:
-            stamp = offset_stamp(row.pop(key))
-            row[key[: -len("_offset_h")]] = stamp.isoformat(timespec="seconds")
+            when = offset_stamp(row.pop(key))
+            row[key[: -len("_offset_h")]] = when.isoformat(timespec="seconds")
         for key in [k for k in row if k.endswith("_today")]:
             hour, minute = (int(x) for x in row.pop(key).split(":"))
-            stamp = NOW.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            row[key[: -len("_today")]] = stamp.isoformat(timespec="seconds")
+            when = NOW.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            row[key[: -len("_today")]] = when.isoformat(timespec="seconds")
     return rows
 
 

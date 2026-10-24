@@ -96,12 +96,21 @@ async def make_plan(
     max_steps: int,
     now: datetime,
     window: TimeWindow | None = None,
+    breadth: bool = False,
+    guidance: str = "",
 ) -> PlanOutcome:
     text = render_request(question, intent, shortlist, registry, max_steps, now, window)
+    if guidance:
+        text += "\n\n" + guidance
+    if breadth:
+        text += (
+            "\n\nBreadth requested: one step per listed tool that could hold part of the answer."
+        )
     result = await agent.run(text, deps=PlanContext(registry, shortlist.allowed, max_steps))
     usage = Usage()
     usage.add(result.usage)
-    return PlanOutcome(plan=result.output, usage=usage)
+    plan = result.output.model_copy(update={"breadth": True}) if breadth else result.output
+    return PlanOutcome(plan=plan, usage=usage)
 
 
 def render_request(

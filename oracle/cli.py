@@ -49,6 +49,9 @@ def ask_cmd(
     level: Annotated[str, typer.Option(help="quick|standard|deep")] = "standard",
     scope: Annotated[str | None, typer.Option(help="only these tools, comma-separated")] = None,
     prefer: Annotated[str | None, typer.Option(help="favour these tools")] = None,
+    breadth: Annotated[
+        bool, typer.Option("--breadth", help="fan out across every applicable tool")
+    ] = False,
     fmt: Format = "md",
     session: Session = None,
 ) -> None:
@@ -59,7 +62,7 @@ def ask_cmd(
     if level not in LEVELS:
         _die(f"--level must be one of {', '.join(LEVELS)}")
     cfg, registry = _setup()
-    req = AskRequest(question, intent, level, _csv(scope), _csv(prefer), session)
+    req = AskRequest(question, intent, level, _csv(scope), _csv(prefer), session, breadth)
     try:
         answer = asyncio.run(ask(req, cfg, registry))
     except ConfigError as exc:
@@ -113,9 +116,18 @@ def tool_list() -> None:
 @tool_app.command("test")
 def tool_test(
     names: Annotated[list[str] | None, typer.Argument(help="tools to test; default all")] = None,
+    ranker: Annotated[
+        bool, typer.Option("--ranker", help="score the ranker on ranker_eval.yaml instead")
+    ] = False,
 ) -> None:
     """Run every manifest example against the real tool. Exit 1 if any fails."""
     cfg, registry = _setup()
+    if ranker:
+        from oracle.rank.eval import run_ranker_eval
+
+        report = run_ranker_eval(registry, REPO_ROOT / "ranker_eval.yaml")
+        typer.echo("\n".join(report.lines()))
+        raise typer.Exit(0 if report.passed else 1)
     unknown = sorted(set(names or []) - set(registry.tools))
     if unknown:
         problems = "".join(f"\n  problem: {p}" for p in registry.problems)
@@ -208,7 +220,95 @@ def _previous_results(path: Path) -> list[dict[str, Any]]:
         return []
 
 
-COMMANDS = {"ask", "expand", "tool", "feedback", "eval", "--help", "-h"}
+@tool_app.command("add")
+def tool_add(
+    binary: Annotated[
+        str | None, typer.Argument(help="the CLI to add, as it is run (on PATH)")
+    ] = None,
+    mcp: Annotated[
+        str | None, typer.Option("--mcp", help="instead, the command that starts an MCP server")
+    ] = None,
+    name: Annotated[str | None, typer.Option(help="manifest name; default the binary")] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="activate if every op verified and nothing overlaps")
+    ] = False,
+) -> None:
+    """Probe a CLI's real --help, draft a manifest, verify it against the tool, and stage it
+    for review. Spends roughly 5-30 model calls."""
+    from oracle.workflows.ingest import IngestError, activate
+
+    _check_add_args(binary, mcp, name)
+    cfg, registry = _setup()
+    source = binary or (mcp or "").split()[0]
+    tool = name or source.rsplit("/", 1)[-1]
+    result = _ingest(cfg, registry, tool, binary, mcp)
+    typer.echo((result.staged / "report.md").read_text())
+    if yes and result.ready:
+        try:
+            typer.echo(f"activated: {activate(cfg, tool)}")
+        except IngestError as exc:
+            _die(str(exc))
+    elif yes:
+        typer.echo("not activated: needs review (see report); run `oracle tool activate` after")
+    raise typer.Exit(0 if result.manifest else 1)
+
+
+def _check_add_args(binary: str | None, mcp: str | None, name: str | None) -> None:
+    if bool(binary) == bool(mcp):
+        _die("give either a CLI binary or --mcp '<server command>'")
+    if mcp and not name:
+        _die("an MCP server needs --name: its command is usually a launcher such as uvx or python")
+
+
+def _ingest(cfg: Config, registry: Registry, tool: str, binary: str | None, mcp: str | None) -> Any:
+    from oracle.llm.models import resolve_model
+    from oracle.workflows.ingest import IngestError, ingest_cli, ingest_mcp
+
+    try:
+        model = resolve_model(cfg.model("planner"))
+        if mcp:
+            return asyncio.run(ingest_mcp(mcp, tool, cfg, registry, model))
+        return asyncio.run(ingest_cli(binary or "", tool, cfg, registry, model))
+    except (ConfigError, IngestError) as exc:
+        _die(str(exc))
+
+
+@tool_app.command("activate")
+def tool_activate(name: Annotated[str, typer.Argument(help="a tool staged by `tool add`")]) -> None:
+    """Copy a reviewed, staged manifest into the active registry."""
+    from oracle.workflows.ingest import IngestError, activate
+
+    cfg, _ = _setup()
+    try:
+        typer.echo(f"activated: {activate(cfg, name)}")
+    except IngestError as exc:
+        _die(str(exc))
+    typer.echo(f"next: oracle tool test {name}")
+
+
+@app.command()
+def report(
+    days: Annotated[float, typer.Option(help="look back this many days")] = 7.0,
+) -> None:
+    """Implicit signals from the log: re-asked questions, used findings, replans, ranker misses
+    (written as candidates for review, never into ranker_eval.yaml) and feedback."""
+    import time
+
+    from oracle.log.report import build_report, write_candidates
+
+    cfg, _ = _setup()
+
+    async def run() -> list[str]:
+        async with open_store(cfg.log_path) as store:
+            rep = await build_report(store.db, time.time() - days * 86400)
+        path = cfg.home / "report" / "ranker_candidates.yaml"
+        n = write_candidates(rep, path)
+        return [*rep.lines(), f"{n} ranker candidates written to {path} (review before adding)"]
+
+    typer.echo("\n".join(asyncio.run(run())))
+
+
+COMMANDS = {"ask", "expand", "tool", "feedback", "eval", "report", "--help", "-h"}
 
 
 def main() -> None:

@@ -11,6 +11,7 @@ from typing import Any
 
 from oracle.exec.dag import StepRun
 from oracle.exec.executor import OpResult
+from oracle.registry.jsonpath import get_field
 from oracle.registry.loader import Registry
 
 MAX_FINDINGS = 15
@@ -74,7 +75,7 @@ def summarise(record: dict[str, Any], fields: list[str], pointer: str = "") -> s
     """Summary field values, minus any the pointer already spells out (paths, line numbers):
     main-context tokens are the expensive ones."""
     keys = fields or list(record)[:4]
-    values = [str(record[k]) for k in keys if record.get(k) not in (None, "", [])]
+    values = [str(get_field(record, k)) for k in keys if get_field(record, k) not in (None, "", [])]
     parts = [_clip(v) for v in values if not _spelled_by(v, pointer)]
     return " · ".join(parts) if parts else _clip(json.dumps(record, default=str))
 

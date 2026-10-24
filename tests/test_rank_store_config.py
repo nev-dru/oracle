@@ -42,7 +42,7 @@ def test_code_question_shortlists_both_code_tools(ranker: Ranker) -> None:
 
 def test_shortlist_is_padded_and_grouped(ranker: Ranker) -> None:
     ranked = ranker.rank("how salesforce talks to cloud")
-    assert len(ranked) == 4  # every tool fits under top=5, matched or not
+    assert len(ranked) == 5  # padded to top=5 with unmatched tools
     graph = next(t for t in ranked if t.tool == "code-graph")
     assert "code-graph.path_between" in graph.ops and len(graph.ops) == 5
 
@@ -84,7 +84,7 @@ def test_config_env_overrides_file_and_profile_paths(tmp_path: Path) -> None:
     assert cfg.model("extract") == "claude-code:haiku"
     with pytest.raises(ConfigError, match="ORACLE_MODEL_DEEP"):
         cfg.model("deep")
-    assert cfg.profile is not None and cfg.profile.tools is not None
+    assert cfg.profile is not None and cfg.profile.registry is not None
     env = cfg.tool_env({"PATH": "/usr/bin"})
     assert env["PATH"].split(":")[0].endswith("adapters/bin")
     assert env["VEX_DB"].endswith(".fixtures/vex.db") and "${" not in env["VEX_DB"]

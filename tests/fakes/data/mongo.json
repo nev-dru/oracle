@@ -1,0 +1,15 @@
+{
+  "users": [
+    {"_id": "u-42", "email": "jane@example.com", "name": "Jane Smith", "account_id": 42, "plan": "enterprise", "created_offset_h": -4000},
+    {"_id": "u-43", "email": "omar@example.com", "name": "Omar Haddad", "account_id": 43, "plan": "team", "created_offset_h": -2000}
+  ],
+  "customers": [
+    {"_id": "c-42", "email": "jane@example.com", "company": "Acme Corp", "account_id": 42, "tier": "gold"},
+    {"_id": "c-43", "email": "omar@example.com", "company": "Globex", "account_id": 43, "tier": "silver"}
+  ],
+  "orders": [
+    {"_id": "o-9001", "account_id": 42, "total": 1290.5, "status": "paid", "created_offset_h": -30},
+    {"_id": "o-9002", "account_id": 42, "total": 88.0, "status": "refunded", "created_offset_h": -5},
+    {"_id": "o-9003", "account_id": 43, "total": 410.0, "status": "paid", "created_offset_h": -12}
+  ]
+}

@@ -1,0 +1,7 @@
+[
+  {"namespace": "payments", "type": "Warning", "reason": "BackOff", "object": "pod/payments-api-7d9f-x2k", "message": "Back-off restarting failed container payments-api", "count": 14, "last_offset_h": -0.2},
+  {"namespace": "billing", "type": "Warning", "reason": "Unhealthy", "object": "pod/billing-api-5b8-q2w", "message": "Readiness probe failed: HTTP probe failed with statuscode: 503", "count": 6, "last_offset_h": -3.1},
+  {"namespace": "billing", "type": "Normal", "reason": "ScalingReplicaSet", "object": "deployment/billing-api", "message": "Scaled down replica set billing-api-5b8 to 0 (rollback)", "count": 1, "last_offset_h": -2.9},
+  {"namespace": "prod", "type": "Normal", "reason": "Pulled", "object": "pod/ingestion-gateway-6f4-a1b", "message": "Container image registry/ingestion-gateway:1.14.2 already present", "count": 1, "last_offset_h": -6},
+  {"namespace": "prod", "type": "Warning", "reason": "OOMKilled", "object": "pod/ingestion-gateway-6f4-a1b", "message": "Container ingestion-gateway exceeded memory limit during batch window", "count": 2, "last_offset_h": -5.5}
+]

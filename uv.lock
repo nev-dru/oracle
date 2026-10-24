@@ -533,6 +533,9 @@ dependencies = [
 claude-code = [
     { name = "claude-agent-sdk" },
 ]
+mcp = [
+    { name = "mcp" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -549,12 +552,13 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "claude-agent-sdk", marker = "extra == 'claude-code'", specifier = ">=0.2.174" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.3.0" },
     { name = "pydantic-ai-slim", extras = ["anthropic", "openai"], specifier = ">=2.61.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
     { name = "typer", specifier = ">=0.27.3" },
 ]
-provides-extras = ["claude-code"]
+provides-extras = ["claude-code", "mcp"]
 
 [package.metadata.requires-dev]
 dev = [

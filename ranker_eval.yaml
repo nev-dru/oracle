@@ -1,0 +1,52 @@
+version: 1
+# Ranker acceptance: each query and the tool(s) that must be in the top 3 the ranker actually
+# matched (padding does not count). `oracle tool test --ranker` reports top-1 and top-3 hit
+# rates; the M3 gate is top-3 >= 90%. Cases whose tools are not registered are skipped and
+# counted separately. Written before the kubectl/argocd/es/mongo manifests existed, so the set
+# encodes intent; a case is never edited to make it pass. New cases come from ranker misses in
+# the logs (`oracle report`), reviewed by hand.
+cases:
+  # code-search: behaviour, no name
+  - {query: "where is rate limiting implemented", expect: [code-search]}
+  - {query: "find the code that retries failed uploads", expect: [code-search]}
+  - {query: "code that validates incoming events", expect: [code-search]}
+  - {query: "snippets about refreshing the service token", expect: [code-search]}
+  # code-graph: names, callers, paths
+  - {query: "who calls transfer_ownership", expect: [code-graph]}
+  - {query: "what does post_batch call", expect: [code-graph]}
+  - {query: "call path from sync_salesforce_changes to publish", expect: [code-graph]}
+  - {query: "find the class named TransferError", expect: [code-graph]}
+  - {query: "which repositories are indexed", expect: [code-graph]}
+  # acli: Jira
+  - {query: "open tickets assigned to me", expect: [acli]}
+  - {query: "status of PLAT-412", expect: [acli]}
+  - {query: "bugs updated this week in the INT project", expect: [acli]}
+  - {query: "who is working on the gateway outage ticket", expect: [acli]}
+  # acli: Confluence
+  - {query: "design doc for the ingestion gateway", expect: [acli]}
+  - {query: "runbook for gateway 5xx errors", expect: [acli]}
+  - {query: "decision record about ownership transfer", expect: [acli]}
+  # workiq: people, Teams, mail, calendar
+  - {query: "who is priya raman", expect: [workiq]}
+  - {query: "what did dana say in teams today", expect: [workiq]}
+  - {query: "emails about failed syncs this morning", expect: [workiq]}
+  - {query: "meetings on my calendar today", expect: [workiq]}
+  - {query: "who is andrew's manager", expect: [workiq]}
+  # kubectl: live cluster state (boundary with argocd and es)
+  - {query: "pods crashlooping in the payments namespace", expect: [kubectl]}
+  - {query: "recent cluster events in the billing namespace", expect: [kubectl]}
+  - {query: "current logs from the ingestion-gateway pod", expect: [kubectl]}
+  - {query: "which deployments are running in the prod namespace", expect: [kubectl]}
+  # argocd: deploys and sync state (boundary with kubectl)
+  - {query: "when was billing-api last deployed", expect: [argocd]}
+  - {query: "argo sync history for billing-api", expect: [argocd]}
+  - {query: "which applications are out of sync", expect: [argocd]}
+  - {query: "deploy history for the gateway today", expect: [argocd]}
+  # es: indexed logs and search (boundary with kubectl logs and mongo)
+  - {query: "search application logs across services for timeout errors", expect: [es]}
+  - {query: "find log lines with request id abc123", expect: [es]}
+  - {query: "count of 500 errors in the access logs today", expect: [es]}
+  # mongo: documents by field (boundary with es)
+  - {query: "find the customer document with email jane@example.com", expect: [mongo]}
+  - {query: "records in the orders collection for account 42", expect: [mongo]}
+  - {query: "look up the user profile stored in the users collection", expect: [mongo]}

@@ -55,3 +55,16 @@ def _children(node: Any, step: str | int) -> list[Any]:
     if isinstance(step, int):
         return [node[step]] if isinstance(node, list) and -len(node) <= step < len(node) else []
     return [node[step]] if isinstance(node, dict) and step in node else []
+
+
+def get_field(record: Any, name: str) -> Any:
+    """A record field by name; `metadata.name` reaches into nested objects (kubectl, ES
+    `_source`). An exact key wins over the dotted reading."""
+    if isinstance(record, dict) and name in record:
+        return record[name]
+    node = record
+    for part in name.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node

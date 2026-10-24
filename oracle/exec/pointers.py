@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from oracle.exec.redact import redact_text
+from oracle.registry.jsonpath import get_field
 from oracle.registry.schema import PLACEHOLDER, Returns
 
 
@@ -17,10 +18,10 @@ def pointer_for(record: dict[str, Any], returns: Returns, tool: str) -> str:
     """
     if returns.pointer:
         fields = PLACEHOLDER.findall(returns.pointer)
-        if all(record.get(f) not in (None, "") for f in fields):
-            return PLACEHOLDER.sub(lambda m: str(record[m.group(1)]), returns.pointer)
-    if returns.id_field and record.get(returns.id_field) not in (None, ""):
-        return f"{tool}:{record[returns.id_field]}"
+        if all(get_field(record, f) not in (None, "") for f in fields):
+            return PLACEHOLDER.sub(lambda m: str(get_field(record, m.group(1))), returns.pointer)
+    if returns.id_field and get_field(record, returns.id_field) not in (None, ""):
+        return f"{tool}:{get_field(record, returns.id_field)}"
     digest = hashlib.sha1(json.dumps(record, sort_keys=True, default=str).encode()).hexdigest()
     return f"{tool}:#{digest[:12]}"
 
@@ -28,7 +29,7 @@ def pointer_for(record: dict[str, Any], returns: Returns, tool: str) -> str:
 def record_id(record: dict[str, Any], returns: Returns) -> str | None:
     if returns.id_field is None:
         return None
-    value = record.get(returns.id_field)
+    value = get_field(record, returns.id_field)
     return None if value in (None, "") else str(value)
 
 

@@ -1,0 +1,115 @@
+name: mongo
+description: Read-only MongoDB queries that list collections, find documents by exact field match, and
+  count matching documents.
+tags:
+- mongo
+- mongodb
+- collection
+- document
+- database
+- query
+- count
+- find
+when: Look up stored records in MongoDB, such as which collections exist, what a user, order or account
+  document contains, or how many documents match a field value.
+not_when: Tickets, runbooks or design docs (use acli); Argo CD app sync, health or deploy history (use
+  argocd); pods, events or logs in the cluster (use kubectl); source code, symbols or callers (use code-search
+  or code-graph); Teams, mail or meetings (use workiq).
+ops:
+- name: collections
+  when: What collections exist in the MongoDB database.
+  argv:
+  - mongo
+  - collections
+  - --json
+  returns:
+    path: $.collections[*]
+    id_field: name
+    summary_fields:
+    - name
+    - count
+    pointer: mongo:{name}
+  chains_to:
+  - mongo.find
+  - mongo.count
+  examples:
+  - expect:
+      min_results: 1
+      has_fields:
+      - name
+      - name
+      - count
+- name: find
+  when: Fetch documents from a collection, optionally filtered by field equality.
+  params:
+    collection:
+      required: true
+      desc: collection name, e.g. users
+      enum_from: mongo.collections
+    filter:
+      desc: 'JSON equality filter, e.g. {"account_id": 42}'
+      type: json
+    projection:
+      desc: 'JSON projection, e.g. {"email": 1}'
+      type: json
+    limit:
+      type: int
+      default: 20
+      desc: max documents, e.g. 20
+      max: 200
+  argv:
+  - mongo
+  - find
+  - --collection
+  - '{collection}'
+  - '{?filter:--filter,filter}'
+  - '{?projection:--projection,projection}'
+  - --limit
+  - '{limit}'
+  - --json
+  returns:
+    path: $.documents[*]
+    id_field: _id
+    summary_fields:
+    - name
+    - created
+    - email
+    - account_id
+    pointer: mongo:{_id}
+  examples:
+  - params:
+      collection: users
+      limit: 5
+    expect:
+      min_results: 1
+      has_fields:
+      - _id
+      - name
+      - created
+- name: count
+  when: How many documents match a filter in a collection.
+  params:
+    collection:
+      required: true
+      desc: collection name, e.g. users
+      enum_from: mongo.collections
+    filter:
+      desc: 'JSON equality filter, e.g. {"status": "open"}'
+      type: json
+  argv:
+  - mongo
+  - count
+  - --collection
+  - '{collection}'
+  - '{?filter:--filter,filter}'
+  - --json
+  returns:
+    summary_fields:
+    - count
+  examples:
+  - params:
+      collection: users
+    expect:
+      min_results: 1
+      has_fields:
+      - count

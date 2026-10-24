@@ -1,0 +1,111 @@
+name: es
+description: Searches Elasticsearch log documents with Lucene queries, counts matching documents in a
+  time window, and lists available indices.
+tags:
+- elasticsearch
+- logs
+- errors
+- search
+- count
+- index
+- lucene
+when: Searching historical or aggregated logs in Elasticsearch, such as errors for a service over a time
+  range, counting how many log lines match a query, or listing which indices exist.
+not_when: Pod status, restarts, events or what a pod is logging right now (use kubectl); deployment sync,
+  health or version (use argocd); source code (use code-search or code-graph); tickets or docs (use acli);
+  Teams, mail or meetings (use workiq).
+ops:
+- name: search
+  when: Find log entries or documents in Elasticsearch matching a query, such as recent errors for a service.
+  params:
+    index:
+      required: true
+      desc: index name or pattern, e.g. logs-*
+    query:
+      desc: Lucene query, e.g. level:error AND service:x
+    since:
+      desc: recency window like 15m, 1h, 1d
+    size:
+      type: int
+      default: 20
+      desc: max hits to return
+      max: 200
+  argv:
+  - es
+  - search
+  - --index
+  - '{index}'
+  - '{?query:--query,query}'
+  - '{?since:--since=,since}'
+  - --size
+  - '{size}'
+  - --json
+  returns:
+    path: $.hits.hits[*]
+    id_field: _id
+    summary_fields:
+    - _source.message
+    - _source.level
+    - _source.service
+    - _index
+    pointer: es:{_id}
+  examples:
+  - params:
+      index: logs-*
+      since: 1d
+      size: 5
+    expect:
+      min_results: 1
+      has_fields:
+      - _id
+      - _source.message
+      - _source.level
+- name: count
+  when: How many documents or log lines match a query in a time window.
+  params:
+    index:
+      required: true
+      desc: index name or pattern, e.g. logs-*
+    query:
+      desc: Lucene query string
+    since:
+      desc: recency window like 1h, 1d
+  argv:
+  - es
+  - count
+  - --index
+  - '{index}'
+  - '{?query:--query,query}'
+  - '{?since:--since=,since}'
+  - --json
+  returns:
+    summary_fields:
+    - count
+  examples:
+  - params:
+      index: logs-*
+      since: 1d
+    expect:
+      min_results: 1
+      has_fields:
+      - count
+- name: indices
+  when: List which Elasticsearch indices exist, to find the right index name or pattern.
+  argv:
+  - es
+  - indices
+  - --json
+  returns:
+    path: $[*]
+    summary_fields:
+    - index
+    - docs.count
+  chains_to:
+  - es.search
+  - es.count
+  examples:
+  - expect:
+      min_results: 1
+      has_fields:
+      - index
+      - docs.count

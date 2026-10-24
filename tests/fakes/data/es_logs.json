@@ -1,0 +1,10 @@
+[
+  {"_index": "logs-gateway", "_id": "g-001", "service": "ingestion-gateway", "level": "error", "status": 503, "request_id": "req-abc123", "message": "upstream timeout after 30s during salesforce batch", "ts_offset_h": -0.5},
+  {"_index": "logs-gateway", "_id": "g-002", "service": "ingestion-gateway", "level": "error", "status": 500, "request_id": "req-abc124", "message": "event bus publish failed: connection reset", "ts_offset_h": -0.7},
+  {"_index": "logs-gateway", "_id": "g-003", "service": "ingestion-gateway", "level": "info", "status": 200, "request_id": "req-abc125", "message": "batch accepted 812 events", "ts_offset_h": -1.2},
+  {"_index": "logs-billing", "_id": "b-001", "service": "billing-api", "level": "error", "status": 500, "request_id": "req-bill-77", "message": "tax rounding assertion failed for invoice 9921", "ts_offset_h": -3.0},
+  {"_index": "logs-billing", "_id": "b-002", "service": "billing-api", "level": "warn", "status": 200, "request_id": "req-bill-78", "message": "slow query on invoices table 2.1s", "ts_offset_h": -20},
+  {"_index": "logs-access", "_id": "a-001", "service": "edge", "level": "info", "status": 500, "request_id": "req-edge-1", "message": "GET /v1/accounts/42 500", "ts_offset_h": -2},
+  {"_index": "logs-access", "_id": "a-002", "service": "edge", "level": "info", "status": 500, "request_id": "req-edge-2", "message": "POST /v1/transfer 500", "ts_offset_h": -4},
+  {"_index": "logs-access", "_id": "a-003", "service": "edge", "level": "info", "status": 200, "request_id": "req-edge-3", "message": "GET /v1/health 200", "ts_offset_h": -1}
+]

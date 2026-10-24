@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Fake Argo CD CLI for the personal laptop: applications, their sync state and deploy history.
+
+Output follows `argocd app ... -o json` (Application objects). Mutating commands refuse.
+"""
+
+from __future__ import annotations
+
+import sys
+
+from _fakelib import emit, fail, help_or, load
+
+HELPS = {
+    "": """argocd controls a Argo CD server (fake)
+
+Usage:
+  argocd [flags]
+  argocd [command]
+
+Available Commands:
+  app         Manage applications
+  login       Log in to Argo CD
+  version     Print version information
+
+Flags:
+  -h, --help   help for argocd
+""",
+    "app": """Manage applications
+
+Usage:
+  argocd app [flags]
+  argocd app [command]
+
+Available Commands:
+  get         Get application details
+  history     Show application deployment history
+  list        List applications
+  delete      Delete an application
+  rollback    Rollback application to a previous deployed version by History ID
+  sync        Sync an application to its target state
+
+Flags:
+  -h, --help   help for app
+""",
+    "app list": """List applications
+
+Usage:
+  argocd app list [flags]
+
+Examples:
+  # List all apps in JSON
+  argocd app list -o json
+
+Flags:
+  -o, --output string     Output format. One of: wide|name|json|yaml (default "wide")
+  -p, --project strings   Filter by project name
+""",
+    "app get": """Get application details
+
+Usage:
+  argocd app get APPNAME [flags]
+
+Examples:
+  argocd app get billing-api -o json
+
+Flags:
+  -o, --output string   Output format. One of: json|yaml|wide|tree (default "wide")
+""",
+    "app history": """Show application deployment history
+
+Usage:
+  argocd app history APPNAME [flags]
+
+Examples:
+  argocd app history billing-api -o json
+
+Flags:
+  -o, --output string   Output format. One of: wide|id|json (default "wide")
+""",
+}
+
+
+def application(app: dict) -> dict:
+    last = app["history"][0]
+    return {"metadata": {"name": app["name"], "namespace": "argocd"},
+            "spec": {"project": app["project"], "destination": {"namespace": app["namespace"]},
+                     "source": {"repoURL": app["repo"]}},
+            "status": {"sync": {"status": app["sync"], "revision": app["revision"]},
+                       "health": {"status": app["health"]},
+                       "operationState": {"finishedAt": last["deployed"], "message": last["result"]}}}
+
+
+def find(name: str) -> dict:
+    for app in load("argocd"):
+        if app["name"] == name:
+            return app
+    fail(f'rpc error: code = NotFound desc = applications.argoproj.io "{name}" not found')
+    raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    argv = sys.argv[1:]
+    words = help_or(HELPS, argv, frozenset({"-o", "--output", "-p", "--project"}))
+    if words[:2] == ["app", "list"]:
+        emit([application(a) for a in load("argocd")])
+    elif words[:2] == ["app", "get"] and len(words) > 2:
+        emit(application(find(words[2])))
+    elif words[:2] == ["app", "history"] and len(words) > 2:
+        emit([{"id": h["id"], "revision": h["revision"], "deployedAt": h["deployed"], "author": h["author"],
+               "message": h["message"], "result": h["result"]} for h in find(words[2])["history"]])
+    elif words[:2] in (["app", "sync"], ["app", "rollback"], ["app", "delete"]) or words[:1] == ["login"]:
+        fail("FATA[0000] this fake argocd never changes anything")
+    else:
+        fail(f"unknown command {' '.join(words)}")

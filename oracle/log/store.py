@@ -101,8 +101,9 @@ class Store:
             for p, rec in zip(r.pointers, r.records, strict=True)
         ]
         await self.db.executemany(
-            "INSERT OR REPLACE INTO pointers (session, pointer, call_id, op, record, ts) "
-            "VALUES (?,?,?,?,?,?)",
+            "INSERT INTO pointers (session, pointer, call_id, op, record, ts) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(session, pointer) DO UPDATE SET call_id = excluded.call_id, "
+            "op = excluded.op, record = excluded.record, ts = excluded.ts",
             rows,
         )
         await self.db.commit()

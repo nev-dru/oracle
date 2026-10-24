@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic_ai.models import Model
 
-from oracle.config import Config
+from oracle.config import REPO_ROOT, Config
 from oracle.exec.dag import PlanRunner, StepRun
 from oracle.exec.executor import Executor
 from oracle.llm.models import resolve_model
@@ -28,8 +28,10 @@ from oracle.plan.planner import Shortlist, Usage, build_planner, make_plan
 from oracle.rank.index import Ranker
 from oracle.registry.loader import Registry
 from oracle.render import Answer, Finding, findings_from, tool_of, trace_line
+from oracle.skills.loader import load_skills, render, select
 from oracle.timewin import TimeWindow, default_builtins, resolve_window
 
+SKILLS = load_skills(REPO_ROOT / "skills")
 MAX_STEPS = {"quick": 1, "standard": 12}
 MAX_REPLANS = 2
 WALL_S = 60.0  # no new check after this; DESIGN's bound for standard
@@ -45,6 +47,8 @@ class AskRequest:
     scope: list[str] | None = None
     prefer: list[str] | None = None
     session: str | None = None
+    breadth: bool = False
+    """Fan out across every applicable tool, one step each, and group findings by source."""
 
 
 @dataclass
@@ -129,8 +133,7 @@ async def ask(
     if not isinstance(models, Models):
         models = Models(planner=models)  # a bare model is the planner
     call = _Call(req, cfg, registry, models)
-    if req.level == "deep":
-        call.notes.append("note: deep is not built yet (M4); ran standard")
+    req = _reconcile(call)
     now = now_in(cfg.timezone)
     call.window = resolve_window(req.question, now)
     ranker = Ranker(registry)
@@ -141,11 +144,7 @@ async def ask(
     call.resolve_models()
     assert models.planner is not None
     planner = build_planner(models.planner)
-    runner = PlanRunner(
-        registry,
-        Executor(registry, cfg.tool_env(), cfg.spill_dir),
-        builtins=call.window.builtins() if call.window else default_builtins(now),
-    )
+    runner = _runner(call, now)
     try:
         outcome = await _bounded(make_plan(
             planner,
@@ -156,6 +155,8 @@ async def ask(
             max_steps=MAX_STEPS[call.level],
             now=now,
             window=call.window,
+            breadth=req.breadth,
+            guidance=_guidance(call, "planner", call.shortlist),
         ))  # fmt: skip
     except Exception as exc:  # any model or transport failure is reported, never a traceback
         call.failures.append(f"planner: {type(exc).__name__}: {exc}")
@@ -170,13 +171,29 @@ async def ask(
     return await _finish(call, runs, runner)
 
 
+def _reconcile(call: _Call) -> AskRequest:
+    """Requests the levels cannot honour as asked, adjusted with a note."""
+    if call.req.level == "deep":
+        call.notes.append("note: deep is not built yet (M4); ran standard")
+    if call.req.breadth and call.req.level == "quick":
+        call.req = replace(call.req, breadth=False)
+        call.notes.append("note: --breadth needs more than one step; ignored at quick")
+    return call.req
+
+
+def _runner(call: _Call, now: datetime) -> PlanRunner:
+    executor = Executor(call.registry, call.cfg.tool_env(), call.cfg.spill_dir)
+    builtins = call.window.builtins() if call.window else default_builtins(now)
+    return PlanRunner(call.registry, executor, builtins=builtins)
+
+
 async def _bounded[T](work: Awaitable[T]) -> T:
     async with asyncio.timeout(MODEL_CALL_S):
         return await work
 
 
 def _shortlist(ranker: Ranker, query: str, req: AskRequest) -> Shortlist:
-    tools = ranker.rank(query, scope=req.scope, prefer=req.prefer)
+    tools = ranker.rank(query, scope=req.scope, prefer=req.prefer, breadth=req.breadth)
     recipes = ranker.rank_recipes(query)
     if req.scope:
         active = set(ranker.registry.tools)
@@ -197,6 +214,7 @@ async def _check_loop(
     planned = len(call.plan.steps)
     while time.monotonic() - call.started <= WALL_S:
         last = call.replans >= MAX_REPLANS or planned >= MAX_STEPS["standard"]
+        conditioned = _conditioned(call, ranker, runs)
         try:
             check = await _bounded(run_check(
                 checker,
@@ -205,11 +223,12 @@ async def _check_loop(
                 plan=call.plan,
                 window=call.window,
                 runs=runs,
-                shortlist=_conditioned(call, ranker, runs),
+                shortlist=conditioned,
                 registry=call.registry,
                 max_steps=0 if last else MAX_STEPS["standard"] - planned,
                 usage=call.usage,
                 earlier=call.step_ids,
+                guidance=_guidance(call, "check", conditioned),
             ))  # fmt: skip
         except Exception as exc:  # a failed check leaves the results as they are
             call.notes.append(f"note: completeness check failed ({type(exc).__name__}: {exc})")
@@ -223,6 +242,14 @@ async def _check_loop(
         runs = runs + await runner.run(check.next_steps, round_=call.replans)
     call.notes.append(f"note: stopped checking at the {WALL_S:g} s bound")
     return runs
+
+
+def _guidance(call: _Call, role: str, shortlist: Shortlist) -> str:
+    tools = [t.tool for t in shortlist.tools]
+    chosen = select(SKILLS, role, tools, call.registry, call.req.question)
+    if chosen and role == "planner":
+        call.notes.append(f"skills: {', '.join(s.name for s in chosen)}")
+    return render(chosen)
 
 
 def _replan(call: _Call, check: Check, planned: int) -> bool:
@@ -288,7 +315,7 @@ async def _run_distill(call: _Call, found: list[StepRun]) -> Distilled:
 def _breadth(call: _Call) -> bool:
     """The plan asked for breadth, or a breadth recipe ran (in the plan or any replan)."""
     used = call.runner.recipes_used if call.runner else []
-    planned = bool(call.plan and call.plan.breadth)
+    planned = call.req.breadth or bool(call.plan and call.plan.breadth)
     return planned or any(call.registry.recipes[r].breadth for r in used)
 
 
