@@ -1,0 +1,53 @@
+version: 1
+# A case passes when every `expect` clause holds against the trace and output.
+# `judge` is a rubric for a Sonnet-as-judge pass over Findings; it fails only on a clear miss.
+cases:
+  - id: events-today
+    query: "important events from today"
+    level: standard
+    expect:
+      breadth: true
+      tools_any: [workiq.calendar.today, workiq.teams.search, acli.jira.search, argocd.app.history, kubectl.events]
+      tools_min: 3
+      findings_min: 3
+      grouped_by_source: true
+      coverage_names_unconfigured: true
+      resolved_time_range_in_trace: true
+      pointers: []
+    judge: "Findings are ordered by importance, each with a pointer; nothing is invented for sources that returned nothing."
+
+  - id: salesforce-to-cloud
+    query: "how salesforce talks to cloud"
+    level: standard
+    expect:
+      tools_all: [code-graph.find_symbol, code-graph.path_between]
+      tools_any: [code-search.search, acli.confluence.search]
+      findings_min: 1
+      pointer_prefixes_any: ["code:"]
+      pointers: []
+    judge: "At least one call path with file:line hops between the two systems; a Confluence design doc is cited if one exists, otherwise Coverage says it was searched and not found."
+
+  - id: ownership-transfer
+    query: "where ownership transfer happens in code"
+    level: standard
+    expect:
+      recipe: code.find_and_expand
+      tools_all: [code-search.search, code-graph.expand]
+      findings_min: 1
+      pointer_prefixes_any: ["code:"]
+      confidence_at_least: medium
+      pointers: []
+    judge: "Each finding is a code location whose expansion shows callers; confidence is high when search and graph agree on the same symbols."
+
+  - id: who-is-andrew-neville
+    query: "who is andrew neville"
+    level: standard
+    expect:
+      breadth: true
+      recipe: people.profile
+      tools_all: [workiq.people.lookup]
+      tools_any: [acli.jira.search, workiq.teams.search]
+      findings_min: 2
+      coverage_names_no_match_sources: true
+      pointers: []
+    judge: "Role and team come from workiq with a pointer; recent tickets or messages are listed with pointers; any source with no match is stated as no match, never guessed."

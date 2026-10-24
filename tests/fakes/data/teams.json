@@ -1,0 +1,7 @@
+[
+  {"id": "19:msg-5501", "chat": "platform-oncall", "from": "Priya Raman", "text": "billing-api rollback is done, opening OPS-1203 for the readiness probe failure", "sent_at_offset_h": -3},
+  {"id": "19:msg-5502", "chat": "platform-oncall", "from": "Andrew Neville", "text": "Ingestion gateway 5xx again during the Salesforce batch, I took OPS-1206", "sent_at_offset_h": -6},
+  {"id": "19:msg-5503", "chat": "accounts-dev", "from": "Andrew Neville", "text": "Found why ownership transfer loses the audit row for deactivated owners, fix in PLAT-412", "sent_at_offset_h": -2},
+  {"id": "19:msg-5504", "chat": "integrations", "from": "Sam Ortiz", "text": "Salesforce connector token refresh PR is up for review", "sent_at_offset_h": -50},
+  {"id": "19:msg-5505", "chat": "Dana Kim / Andrew Neville", "from": "Dana Kim", "text": "Can you present the transfer v2 plan at Thursday's review? Please confirm today.", "sent_at_offset_h": -1}
+]

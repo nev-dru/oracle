@@ -1,0 +1,25 @@
+name: code-search
+description: Semantic and full-text search over indexed code and docs (vex, local SQLite with embeddings). Finds code by what it does.
+tags: [code, search, semantic, docs, snippets]
+when: "Locate code or docs by meaning or behaviour, when the exact symbol name is unknown."
+not_when: "The exact symbol name is known (use code-graph.find_symbol), or you need callers and call paths (use code-graph)."
+auth: {env: []}
+limits: {timeout_s: 30, concurrency: 2, max_output_kb: 256}
+ops:
+  - name: search
+    when: "Find code chunks related to a concept or behaviour, ranked by hybrid BM25 + vector score."
+    params:
+      query: {type: str, required: true, desc: "natural language, 3-12 words"}
+      path: {type: str, desc: "glob to restrict file paths, e.g. '*/accounts/*'"}
+      limit: {type: int, default: 10, max: 50}
+    argv: ["vex", "search", "--json", "--limit", "{limit}", "{?path:--path,path}", "--", "{query}"]
+    returns:
+      format: json
+      path: "$[*]"
+      id_field: chunk_id
+      summary_fields: [title, path, start_line, kind]
+      pointer: "code:{path}:{start_line}"
+    chains_to: [code-graph.symbols_at]
+    examples:
+      - params: {query: "ownership transfer", limit: 5}
+        expect: {min_results: 1, has_fields: [path, start_line, title]}

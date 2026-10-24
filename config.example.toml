@@ -1,0 +1,17 @@
+# Copy to ~/.oracle/config.toml. Environment variables (ORACLE_MODEL_PLANNER, ORACLE_PROFILE, ...)
+# override anything here.
+
+profile = "home"                 # profiles/home.toml in this repo, or ~/.oracle/profiles/<name>.toml
+# timezone = "America/Los_Angeles"  # for "today"; default is the system zone
+
+[models]
+# Home: the Claude subscription through Claude Code (needs `uv sync --extra claude-code`).
+planner = "claude-code:sonnet"
+extract = "claude-code:haiku"
+deep = "claude-code:opus"
+
+# Work: Bedrock through LiteLLM, as PydanticAI OpenAI-compatible model strings.
+# Also set OPENAI_BASE_URL=https://<litellm>/v1 and OPENAI_API_KEY.
+# planner = "openai:bedrock/anthropic.claude-sonnet-..."
+# extract = "openai:bedrock/anthropic.claude-haiku-..."
+# deep    = "openai:bedrock/anthropic.claude-opus-..."

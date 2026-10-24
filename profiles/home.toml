@@ -1,0 +1,12 @@
+# Personal laptop: real vex and codebase-memory over the fixture repo, fake acli and workiq.
+# Select with ORACLE_PROFILE=home or `profile = "home"` in ~/.oracle/config.toml.
+# Build the fixture indexes first: `make fixtures`.
+
+# Home manifests live with the profile, so registry/tools stays the work registry that
+# `oracle tool add` fills one tool at a time.
+registry = "home/tools"
+tools = ["code-search", "code-graph", "acli", "workiq"]
+path_prepend = ["../adapters/bin", "../tests/fakes/bin"]
+
+[env]
+VEX_DB = "${PROFILE_DIR}/../.fixtures/vex.db"

@@ -1,0 +1,68 @@
+name: acli
+description: Atlassian CLI for Jira work items (tickets, status, assignees) and Confluence pages (design docs, runbooks, decisions).
+tags: [jira, tickets, issues, status, assignee, confluence, docs, design, runbook, wiki]
+when: "Tickets, their status and who is working on what (Jira); written documents, designs and decisions (Confluence)."
+not_when: "Chat messages, mail or meetings (use workiq); source code (use code-search or code-graph)."
+limits: {timeout_s: 30, concurrency: 4, max_output_kb: 256}
+ops:
+  - name: jira.search
+    when: "Find Jira tickets with JQL: by text, assignee, status, project or recently updated."
+    params:
+      jql: {type: str, required: true, desc: "JQL, e.g. 'assignee = currentUser() AND updated >= -1d ORDER BY updated DESC'"}
+      limit: {type: int, default: 20, max: 100, desc: "results per page; the executor fetches up to 5 pages"}
+    argv: ["acli", "jira", "workitem", "search", "--jql", "{jql}", "--limit", "{limit}", "{?cursor:--start-at,cursor}", "--json"]
+    paginate: {param: cursor, next: "$.next_start_at", max_pages: 5}
+    returns:
+      format: json
+      path: "$.issues[*]"
+      id_field: key
+      summary_fields: [key, summary, status, assignee, updated]
+      pointer: "jira:{key}"
+    chains_to: [acli.jira.get]
+    examples:
+      - params: {jql: "text ~ \"ownership transfer\"", limit: 2}
+        expect: {min_results: 3, has_fields: [key, summary, status]}
+  - name: jira.get
+    when: "Full details of one Jira ticket by key."
+    params:
+      key: {type: str, required: true, desc: "ticket key, e.g. PLAT-412"}
+    argv: ["acli", "jira", "workitem", "view", "{key}", "--json"]
+    returns:
+      format: json
+      path: "$"
+      id_field: key
+      summary_fields: [key, summary, status, assignee, description]
+      pointer: "jira:{key}"
+    examples:
+      - params: {key: PLAT-412}
+        expect: {min_results: 1, has_fields: [key, summary, description]}
+  - name: confluence.search
+    when: "Find Confluence pages with CQL: design docs, runbooks, decisions."
+    params:
+      cql: {type: str, required: true, desc: "CQL, e.g. 'text ~ \"ownership transfer\"' or 'space = ARCH AND title ~ \"gateway\"'"}
+      limit: {type: int, default: 10, max: 50}
+    argv: ["acli", "confluence", "page", "search", "--cql", "{cql}", "--limit", "{limit}", "--json"]
+    returns:
+      format: json
+      path: "$.results[*]"
+      id_field: id
+      summary_fields: [title, space, excerpt, updated]
+      pointer: "conf:{id}"
+    chains_to: [acli.confluence.get]
+    examples:
+      - params: {cql: "text ~ \"salesforce cloud\""}
+        expect: {min_results: 1, has_fields: [id, title]}
+  - name: confluence.get
+    when: "Full content of one Confluence page by id."
+    params:
+      id: {type: str, required: true, desc: "page id"}
+    argv: ["acli", "confluence", "page", "view", "--id", "{id}", "--json"]
+    returns:
+      format: json
+      path: "$"
+      id_field: id
+      summary_fields: [title, space, author, excerpt]
+      pointer: "conf:{id}"
+    examples:
+      - params: {id: "88123"}
+        expect: {min_results: 1, has_fields: [id, title]}

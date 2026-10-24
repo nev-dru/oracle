@@ -1,0 +1,5 @@
+[
+  {"id": "evt-301", "subject": "Platform standup", "organizer": "Dana Kim", "attendees": ["Andrew Neville", "Priya Raman", "Sam Ortiz"], "start_today": "09:30", "end_today": "09:45"},
+  {"id": "evt-302", "subject": "Incident review: ingestion gateway 5xx", "organizer": "Priya Raman", "attendees": ["Andrew Neville", "Sam Ortiz"], "start_today": "13:00", "end_today": "13:30"},
+  {"id": "evt-303", "subject": "1:1 Dana / Andrew", "organizer": "Dana Kim", "attendees": ["Andrew Neville"], "start_today": "16:00", "end_today": "16:30"}
+]

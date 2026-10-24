@@ -1,0 +1,79 @@
+name: code-graph
+description: "Code knowledge graph (codebase-memory): symbols, callers, callees and call paths across indexed repositories."
+tags: [code, graph, symbols, callers, callees, call-path, architecture]
+when: "Find a symbol by name, list who calls it or what it calls, or trace how one part of the code reaches another."
+not_when: "Searching by behaviour with no name to go on (use code-search.search first)."
+limits: {timeout_s: 30, concurrency: 4, max_output_kb: 256}
+ops:
+  - name: find_symbol
+    when: "Find functions, methods and classes whose name matches a glob."
+    params:
+      pattern: {type: str, required: true, desc: "case-insensitive name glob, e.g. '*transfer*owner*'; no wildcards means substring"}
+      repo: {type: str, enum_from: code-graph.list_repos, desc: "repository name; omit to search all"}
+      limit: {type: int, default: 20, max: 100}
+    argv: ["cmm-graph", "find", "--pattern", "{pattern}", "{?repo:--repo,repo}", "--limit", "{limit}"]
+    returns: &symbols
+      format: json
+      path: "$.results[*]"
+      id_field: symbol_id
+      summary_fields: [name, kind, path, line]
+      pointer: "code:{path}:{line}"
+    chains_to: [code-graph.expand, code-graph.path_between]
+    examples:
+      - params: {pattern: "*transfer*owner*", repo: acme}
+        expect: {min_results: 1, has_fields: [symbol_id, path, line]}
+  - name: expand
+    when: "Callers or callees of a list of symbol ids from find_symbol or symbols_at."
+    params:
+      ids: {type: "list[str]", required: true, desc: "symbol ids (qualified names)"}
+      direction: {type: str, enum: [callers, callees], default: callers}
+      limit: {type: int, default: 50, max: 200}
+    argv: ["cmm-graph", "expand", "--ids", "{ids}", "--direction", "{direction}", "--limit", "{limit}"]
+    returns:
+      format: json
+      path: "$.results[*]"
+      id_field: symbol_id
+      summary_fields: [name, path, line, direction, of]
+      pointer: "code:{path}:{line}"
+    examples:
+      - params: {ids: ["Users-andrewneville-dev-oracle-tests-fakes-acme.accounts.ownership.transfer_ownership"], direction: callers}
+        expect: {min_results: 2, has_fields: [symbol_id, of]}
+  - name: symbols_at
+    when: "Map path:line locations (e.g. code-search hits) to their enclosing symbols, to expand them."
+    params:
+      at: {type: "list[str]", required: true, desc: "locations as path:line; absolute, or relative to the repo root"}
+      repo: {type: str, enum_from: code-graph.list_repos}
+    argv: ["cmm-graph", "symbols-at", "--at", "{at}", "{?repo:--repo,repo}"]
+    returns: *symbols
+    chains_to: [code-graph.expand]
+    examples:
+      - params: {at: ["accounts/ownership.py:15"], repo: acme}
+        expect: {min_results: 1, has_fields: [symbol_id, at]}
+  - name: path_between
+    when: "Shortest call path from one symbol to another: how A reaches B."
+    params:
+      source: {type: str, required: true, desc: "symbol name or id where the path starts"}
+      target: {type: str, required: true, desc: "symbol name or id where the path ends"}
+      repo: {type: str, enum_from: code-graph.list_repos}
+      max_depth: {type: int, default: 6, max: 10}
+    argv: ["cmm-graph", "path", "--from", "{source}", "--to", "{target}", "{?repo:--repo,repo}", "--max-depth", "{max_depth}"]
+    returns:
+      format: json
+      path: "$.results[*]"
+      id_field: symbol_id
+      summary_fields: [hop, name, path, line]
+      pointer: "code:{path}:{line}"
+    examples:
+      - params: {source: sync_salesforce_changes, target: publish, repo: acme}
+        expect: {min_results: 3, has_fields: [hop, path, line]}
+  - name: list_repos
+    when: "List the repositories the graph has indexed."
+    argv: ["cmm-graph", "repos"]
+    returns:
+      format: json
+      path: "$.results[*]"
+      id_field: name
+      summary_fields: [name, root_path, nodes]
+      pointer: "repo:{name}"
+    examples:
+      - expect: {min_results: 1, has_fields: [name, root_path]}

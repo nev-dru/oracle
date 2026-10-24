@@ -1,0 +1,4 @@
+[
+  {"id": "AAMk-7781", "from": "Dana Kim", "subject": "Q4 platform priorities", "text": "Draft priorities attached; comments by Friday.", "sent_at_offset_h": -20},
+  {"id": "AAMk-7790", "from": "ArgoCD", "subject": "Sync failed: billing-api (prod)", "text": "Health check degraded, automatic rollback performed.", "sent_at_offset_h": -3}
+]

@@ -1,0 +1,67 @@
+name: workiq
+description: Microsoft 365 via Work IQ - people directory, Teams messages, Outlook mail and today's calendar.
+tags: [people, who, directory, teams, chat, messages, mail, email, calendar, meetings, today]
+when: "Who someone is (role, team, manager); what people said in Teams or mail; what meetings are on today."
+not_when: "Tickets or documents (use acli); code (use code-search or code-graph)."
+limits: {timeout_s: 30, concurrency: 4, max_output_kb: 256}
+ops:
+  - name: people.lookup
+    when: "Look up a person by name or email: title, department, manager, office. Primary source for 'who is X'."
+    params:
+      name: {type: str, required: true, desc: "full or partial name, or email"}
+      limit: {type: int, default: 5, max: 25}
+    argv: ["workiq", "people", "lookup", "--name", "{name}", "--limit", "{limit}", "--json"]
+    returns:
+      format: json
+      path: "$.people[*]"
+      id_field: id
+      summary_fields: [display_name, title, department, manager, email]
+      pointer: "people:{id}"
+    examples:
+      - params: {name: "andrew neville"}
+        expect: {min_results: 1, has_fields: [display_name, title, department]}
+  - name: teams.search
+    when: "Search Teams chat messages by text, sender and time."
+    params:
+      query: {type: str, desc: "words to match; omit to list everything in the time window"}
+      sender: {type: str, desc: "sender name"}
+      since: {type: str, desc: "today, 24h, -3d or an ISO timestamp"}
+      limit: {type: int, default: 20, max: 100}
+    argv: ["workiq", "teams", "search", "{?query:--query,query}", "{?sender:--from,sender}", "{?since:--since=,since}", "--limit", "{limit}", "--json"]
+    returns: &messages
+      format: json
+      path: "$.messages[*]"
+      id_field: id
+      summary_fields: [from, chat, text, sent_at]
+      pointer: "teams:{id}"
+    examples:
+      - params: {sender: "andrew neville", since: "-7d"}
+        expect: {min_results: 1, has_fields: [id, from, text]}
+  - name: mail.search
+    when: "Search Outlook mail by text, sender and time."
+    params:
+      query: {type: str, desc: "words to match in subject or body"}
+      sender: {type: str, desc: "sender name"}
+      since: {type: str, desc: "today, 24h, -3d or an ISO timestamp"}
+      limit: {type: int, default: 20, max: 100}
+    argv: ["workiq", "mail", "search", "{?query:--query,query}", "{?sender:--from,sender}", "{?since:--since=,since}", "--limit", "{limit}", "--json"]
+    returns:
+      format: json
+      path: "$.messages[*]"
+      id_field: id
+      summary_fields: [from, subject, sent_at]
+      pointer: "mail:{id}"
+    examples:
+      - params: {query: "billing-api", since: "-7d"}
+        expect: {min_results: 1, has_fields: [id, subject]}
+  - name: calendar.today
+    when: "Today's meetings and events."
+    argv: ["workiq", "calendar", "today", "--json"]
+    returns:
+      format: json
+      path: "$.events[*]"
+      id_field: id
+      summary_fields: [subject, start, end, organizer]
+      pointer: "cal:{id}"
+    examples:
+      - expect: {min_results: 1, has_fields: [subject, start]}

@@ -1,0 +1,66 @@
+[project]
+name = "oracle"
+version = "0.1.0"
+description = "One read-only CLI that routes a plain-language question to the right tools and returns distilled findings"
+authors = [
+    { name = "nev-dru", email = "dru.neville@gmail.com" }
+]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "pydantic-ai-slim[anthropic,openai]>=2.61.0",
+    "pyyaml>=6.0.3",
+    "rank-bm25>=0.2.2",
+    "typer>=0.27.3",
+]
+
+
+[project.scripts]
+oracle = "oracle.cli:main"
+
+[project.optional-dependencies]
+claude-code = [
+    "claude-agent-sdk>=0.2.174",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "radon>=6.0.1",
+    "ruff>=0.17.2",
+    "types-pyyaml>=6.0.12.20260906",
+    "vulture>=2.16",
+    "xenon>=0.9.3",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["tests/fakes/acme"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C90", "RUF"]
+ignore = ["RUF001"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.pyright]
+include = ["oracle", "tests"]
+exclude = ["tests/fakes"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Read-only JSON CLI over codebase-memory-mcp, shaped for the oracle's code-graph manifest.
+
+codebase-memory-mcp takes one JSON argument per call; manifests build argv lists, not JSON,
+so this adapter exposes flat flags and always prints one JSON object on stdout.
+Stdlib only and Python 3.9-compatible, because it runs under whatever python3 is on PATH.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from collections import deque
+
+CMM = os.environ.get("CMM_BIN", "codebase-memory-mcp")
+SYMBOL_LABELS = ("Function", "Method", "Class")
+NODE_COLS = "m.qualified_name, m.name, m.label, m.file_path, m.start_line"
+LABEL_FILTER = " OR ".join(f'm.label = "{label}"' for label in SYMBOL_LABELS)
+
+
+def cmm(tool: str, args: dict) -> dict:
+    proc = subprocess.run(
+        [CMM, "cli", tool, json.dumps(args)], capture_output=True, text=True, timeout=60
+    )
+    if proc.returncode != 0:
+        raise SystemExit(f"codebase-memory-mcp {tool} failed: {proc.stderr.strip()[-400:]}")
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        raise SystemExit(f"codebase-memory-mcp {tool}: not JSON: {proc.stdout[:200]}") from None
+
+
+def projects() -> list[dict]:
+    return cmm("list_projects", {}).get("projects", [])
+
+
+def roots() -> dict[str, str]:
+    return {p["name"]: p["root_path"] for p in projects()}
+
+
+def query(project: str, cypher: str) -> list[list[str]]:
+    out = cmm("query_graph", {"project": project, "query": cypher})
+    if "error" in out:
+        raise SystemExit(f"query failed: {out['error']}")
+    return out.get("rows", [])
+
+
+def quote(s: str) -> str:
+    return json.dumps(s)
+
+
+def glob_regex(pattern: str) -> str:
+    """Case-insensitive regex for a glob (`*transfer*owner*`); no wildcards means substring.
+
+    Character classes stand in for (?i), which the graph engine rejects.
+    """
+    if not any(c in pattern for c in "*?"):
+        pattern = f"*{pattern}*"
+    out = []
+    for c in pattern:
+        if c == "*":
+            out.append(".*")
+        elif c == "?":
+            out.append(".")
+        elif c.isalpha():
+            out.append(f"[{c.upper()}{c.lower()}]")
+        else:
+            out.append(re.escape(c))
+    return "".join(out)
+
+
+def node(row: list[str], root: str) -> dict:
+    qn, name, label, path, line = (row + [""] * 5)[:5]
+    return {
+        "symbol_id": qn,
+        "name": name,
+        "kind": label,
+        "path": os.path.join(root, path) if root and path else path,
+        "line": int(line) if str(line).isdigit() else 0,
+    }
+
+
+def project_of(symbol_id: str, known: dict[str, str]) -> str:
+    for name in known:
+        if symbol_id.startswith(name + "."):
+            return name
+    raise SystemExit(f"no indexed repo owns symbol {symbol_id}")
+
+
+def pick_projects(repo: str | None, known: dict[str, str]) -> list[str]:
+    if not repo:
+        return list(known)
+    hits = [n for n, root in known.items() if repo in (n, root, os.path.basename(root))]
+    if not hits:
+        raise SystemExit(f"repo {repo!r} is not indexed; known: {sorted(known)}")
+    return hits
+
+
+def cmd_repos(_: argparse.Namespace) -> dict:
+    rows = [
+        {"name": os.path.basename(p["root_path"]), "project": p["name"],
+         "root_path": p["root_path"], "nodes": p.get("nodes", 0)}
+        for p in projects()
+    ]
+    return {"results": rows}
+
+
+def cmd_find(a: argparse.Namespace) -> dict:
+    known = roots()
+    cypher = (
+        f"MATCH (m) WHERE m.name =~ {quote(glob_regex(a.pattern))} AND ({LABEL_FILTER}) "
+        f"RETURN {NODE_COLS} LIMIT {a.limit}"
+    )
+    out: list[dict] = []
+    for project in pick_projects(a.repo, known):
+        out += [node(r, known[project]) for r in query(project, cypher)]
+    return {"results": out[: a.limit]}
+
+
+def neighbours(project: str, ids: list[str], direction: str, limit: int) -> list[tuple[str, list]]:
+    """(source id, neighbour row) pairs; callers of ids or callees of ids."""
+    id_list = "[" + ", ".join(quote(i) for i in ids) + "]"
+    if direction == "callers":
+        cypher = f"MATCH (m)-[:CALLS]->(t) WHERE t.qualified_name IN {id_list} "
+    else:
+        cypher = f"MATCH (t)-[:CALLS]->(m) WHERE t.qualified_name IN {id_list} "
+    cypher += f"RETURN t.qualified_name, {NODE_COLS} LIMIT {limit}"
+    return [(r[0], r[1:]) for r in query(project, cypher)]
+
+
+def cmd_expand(a: argparse.Namespace) -> dict:
+    known = roots()
+    ids = [i for i in a.ids.split(",") if i]
+    by_project: dict[str, list[str]] = {}
+    for i in ids:
+        by_project.setdefault(project_of(i, known), []).append(i)
+    out: list[dict] = []
+    for project, group in by_project.items():
+        for source, row in neighbours(project, group, a.direction, a.limit):
+            out.append({**node(row, known[project]), "of": source, "direction": a.direction})
+    return {"results": out[: a.limit]}
+
+
+def resolve(project: str, name: str) -> list[str]:
+    cypher = f"MATCH (m) WHERE m.name = {quote(name)} OR m.qualified_name = {quote(name)} "
+    cypher += "RETURN m.qualified_name LIMIT 20"
+    return [r[0] for r in query(project, cypher)]
+
+
+def bfs(project: str, starts: list[str], goals: set[str], depth: int) -> list[str]:
+    parent: dict[str, str | None] = {s: None for s in starts}
+    frontier = deque(starts)
+    for _ in range(depth):
+        if not frontier:
+            break
+        layer = list(frontier)
+        frontier.clear()
+        for source, row in neighbours(project, layer, "callees", 2000):
+            target = row[0]
+            if target in parent:
+                continue
+            parent[target] = source
+            if target in goals:
+                return unwind(parent, target)
+            frontier.append(target)
+    return []
+
+
+def unwind(parent: dict[str, str | None], end: str) -> list[str]:
+    chain: list[str] = [end]
+    while parent[chain[-1]] is not None:
+        chain.append(parent[chain[-1]])  # type: ignore[arg-type]
+    return chain[::-1]
+
+
+def cmd_path(a: argparse.Namespace) -> dict:
+    known = roots()
+    for project in pick_projects(a.repo, known):
+        starts, goals = resolve(project, a.source), set(resolve(project, a.target))
+        chain = bfs(project, starts, goals, a.max_depth) if starts and goals else []
+        if chain:
+            rows = query(
+                project,
+                "MATCH (m) WHERE m.qualified_name IN ["
+                + ", ".join(quote(c) for c in chain)
+                + f"] RETURN {NODE_COLS}",
+            )
+            nodes = {r[0]: node(r, known[project]) for r in rows}
+            hops = [{**nodes.get(c, {"symbol_id": c}), "hop": i} for i, c in enumerate(chain)]
+            return {"results": hops}
+    return {"results": []}
+
+
+def spans(project: str, rel_path: str) -> list[tuple[int, int, list[str]]]:
+    """(start, end, node row) for symbols in one file.
+
+    start_line and end_line are fetched in separate queries: asking for both in one RETURN
+    makes the engine report end_line in both columns.
+    """
+    where = f"WHERE m.file_path = {quote(rel_path)} AND ({LABEL_FILTER})"
+    rows = query(project, f"MATCH (m) {where} RETURN {NODE_COLS}")
+    ends = dict(query(project, f"MATCH (m) {where} RETURN m.qualified_name, m.end_line"))
+    out = []
+    for row in rows:
+        start, end = int(row[4] or 0), int(ends.get(row[0]) or 0)
+        out.append((start, max(start, end), row))
+    return out
+
+
+def enclosing(project: str, root: str, location: str) -> dict | None:
+    path, _, line_s = location.rpartition(":")
+    if not line_s.isdigit():
+        raise SystemExit(f"expected path:line, got {location!r}")
+    line = int(line_s)
+    rel = os.path.relpath(path, root) if os.path.isabs(path) else path
+    hits = [(e - s, row) for s, e, row in spans(project, rel) if s <= line <= e]
+    if not hits:
+        return None
+    return {**node(min(hits, key=lambda h: h[0])[1], root), "at": location}
+
+
+def cmd_symbols_at(a: argparse.Namespace) -> dict:
+    known = roots()
+    out: list[dict] = []
+    for location in [x for x in a.at.split(",") if x]:
+        for project in pick_projects(a.repo, known):
+            root = known[project]
+            if os.path.isabs(location) and not location.startswith(root + os.sep):
+                continue
+            hit = enclosing(project, root, location)
+            if hit:
+                out.append(hit)
+                break
+    return {"results": out}
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="cmm-graph", description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("repos", help="list indexed repositories").set_defaults(fn=cmd_repos)
+    f = sub.add_parser("find", help="find symbols by name glob, case-insensitive (*transfer*)")
+    f.add_argument("--pattern", required=True)
+    f.add_argument("--repo")
+    f.add_argument("--limit", type=int, default=20)
+    f.set_defaults(fn=cmd_find)
+    e = sub.add_parser("expand", help="callers or callees of symbol ids")
+    e.add_argument("--ids", required=True, help="comma-separated symbol ids")
+    e.add_argument("--direction", choices=["callers", "callees"], default="callers")
+    e.add_argument("--limit", type=int, default=50)
+    e.set_defaults(fn=cmd_expand)
+    s = sub.add_parser("symbols-at", help="enclosing symbol for each path:line location")
+    s.add_argument("--at", required=True, help="comma-separated path:line locations")
+    s.add_argument("--repo")
+    s.set_defaults(fn=cmd_symbols_at)
+    t = sub.add_parser("path", help="shortest call path from one symbol to another")
+    t.add_argument("--from", dest="source", required=True)
+    t.add_argument("--to", dest="target", required=True)
+    t.add_argument("--repo")
+    t.add_argument("--max-depth", type=int, default=6)
+    t.set_defaults(fn=cmd_path)
+    return p
+
+
+def main() -> None:
+    args = parser().parse_args()
+    json.dump(args.fn(args), sys.stdout)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()

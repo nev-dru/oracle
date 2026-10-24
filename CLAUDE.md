@@ -1,0 +1,1 @@
+read docs/DESIGN.md before any work; build in milestone order; a milestone is done when its gate command is green; treat golden.yaml as acceptance; don’t add dependencies beyond the ones the layout names without asking.

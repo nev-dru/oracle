@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Fake Atlassian CLI (acli) for the personal laptop: Jira work items and Confluence pages.
+
+Flags and output shapes are guesses at the real acli. Fixtures: tests/fakes/data/{jira,confluence}.json.
+"""
+
+from __future__ import annotations
+
+import argparse
+
+from _fakelib import after, clauses, emit, fail, load, matches, page, since
+
+ME = "andrew.neville@example.com"
+
+
+def jira_match(issue: dict, field: str, op: str, value: str) -> bool:
+    if field in ("text", "summary"):
+        return matches(value, issue["summary"], issue.get("description"))
+    if field == "assignee":
+        want = ME if value.lower() in ("currentuser()", "currentuser") else value.lower()
+        return want in (issue.get("assignee_email", ""), issue.get("assignee", "").lower())
+    if field == "updated" and op == ">=":
+        return after(issue["updated"], since(value))
+    if field in ("key", "project", "status"):
+        return str(issue.get(field, "")).lower() == value.lower()
+    return True
+
+
+def jira_search(a: argparse.Namespace) -> None:
+    rows = load("jira")
+    for field, op, value in clauses(a.jql):
+        rows = [r for r in rows if jira_match(r, field, op, value)]
+    rows.sort(key=lambda r: r["updated"], reverse=True)
+    chunk, nxt = page(rows, a.start_at, a.limit)
+    emit({"issues": chunk, "total": len(rows), "next_start_at": nxt})
+
+
+def jira_view(a: argparse.Namespace) -> None:
+    for issue in load("jira"):
+        if issue["key"].lower() == a.key.lower():
+            emit(issue)
+            return
+    fail(f"work item {a.key} not found")
+
+
+def conf_match(page_: dict, field: str, value: str) -> bool:
+    if field in ("text", "title"):
+        body = page_.get("excerpt") if field == "text" else None
+        return matches(value, page_["title"], body)
+    if field == "space":
+        return page_["space"].lower() == value.lower()
+    return True
+
+
+def conf_search(a: argparse.Namespace) -> None:
+    rows = load("confluence")
+    for field, _op, value in clauses(a.cql):
+        rows = [r for r in rows if conf_match(r, field, value)]
+    emit({"results": rows[: a.limit]})
+
+
+def conf_view(a: argparse.Namespace) -> None:
+    for p in load("confluence"):
+        if p["id"] == a.id:
+            emit(p)
+            return
+    fail(f"page {a.id} not found")
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="acli", description="Atlassian CLI (fake)")
+    product = p.add_subparsers(dest="product", required=True)
+
+    jira = product.add_parser("jira", help="Jira commands").add_subparsers(dest="noun", required=True)
+    wi = jira.add_parser("workitem", help="work items").add_subparsers(dest="verb", required=True)
+    s = wi.add_parser("search", help="search work items with JQL")
+    s.add_argument("--jql", required=True)
+    s.add_argument("--limit", type=int, default=10)
+    s.add_argument("--start-at", type=int, default=0)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=jira_search)
+    v = wi.add_parser("view", help="view one work item")
+    v.add_argument("key")
+    v.add_argument("--json", action="store_true")
+    v.set_defaults(fn=jira_view)
+
+    conf = product.add_parser("confluence", help="Confluence commands")
+    pg = conf.add_subparsers(dest="noun", required=True).add_parser("page", help="pages")
+    pv = pg.add_subparsers(dest="verb", required=True)
+    cs = pv.add_parser("search", help="search pages with CQL")
+    cs.add_argument("--cql", required=True)
+    cs.add_argument("--limit", type=int, default=10)
+    cs.add_argument("--json", action="store_true")
+    cs.set_defaults(fn=conf_search)
+    cv = pv.add_parser("view", help="view one page")
+    cv.add_argument("--id", required=True)
+    cv.add_argument("--json", action="store_true")
+    cv.set_defaults(fn=conf_view)
+    return p
+
+
+if __name__ == "__main__":
+    args = parser().parse_args()
+    args.fn(args)

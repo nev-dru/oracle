@@ -1,0 +1,6 @@
+[
+  {"id": "u-1001", "display_name": "Andrew Neville", "email": "andrew.neville@example.com", "title": "Staff Software Engineer", "department": "Platform Engineering", "manager": "Dana Kim", "office": "Remote"},
+  {"id": "u-1002", "display_name": "Andrea Nevins", "email": "andrea.nevins@example.com", "title": "Product Designer", "department": "Design", "manager": "Lee Park", "office": "Seattle"},
+  {"id": "u-1003", "display_name": "Priya Raman", "email": "priya.raman@example.com", "title": "Senior SRE", "department": "Platform Engineering", "manager": "Dana Kim", "office": "Austin"},
+  {"id": "u-1004", "display_name": "Sam Ortiz", "email": "sam.ortiz@example.com", "title": "Integration Engineer", "department": "Integrations", "manager": "Dana Kim", "office": "Remote"}
+]
