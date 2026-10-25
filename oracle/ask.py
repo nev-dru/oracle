@@ -1,48 +1,32 @@
-"""One oracle invocation: rank -> plan -> execute -> check and replan -> distill -> log -> Answer.
+"""One oracle invocation: enter the guard -> rank -> strategy -> summary -> log -> Answer.
 
-quick: one step, no check, findings from summary fields. standard: up to 12 steps, a completeness
-check with at most two replans, distilled findings. deep: the plan, then a crawl that follows what
-the results mention, or (`script`) one model-written script against the tools; a map-reduce
-summary either way.
+The strategy (`oracle/strategy.py`) is how the call gathers: quick plans and runs; standard
+adds a completeness check with at most two replans; deep crawls what the results mention, or
+(`script`) runs one model-written script against the tools. The summary is per tier: quick
+reads summary fields, standard distills, deep map-reduces what was found.
 """
 
 import asyncio
-import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 from typing import TypedDict
-from zoneinfo import ZoneInfo
 
 from pydantic_ai.models import Model
 
 from oracle.budget import Budget, Interrupted, parse_budget
-from oracle.config import REPO_ROOT, Config, ConfigError
-from oracle.deep.scripted import ScriptPath, ScriptRun
-from oracle.exec.dag import PlanRunner, StepRun
-from oracle.exec.executor import Executor
+from oracle.config import Config, ConfigError
+from oracle.exec.dag import StepRun
 from oracle.llm.models import resolve_model
 from oracle.log.store import CallRecord, open_store
-from oracle.plan.check import Check, build_checker, run_check
-from oracle.plan.digest import summary_of
 from oracle.plan.distill import Distilled, build_distiller, run_distill
-from oracle.plan.models import Plan
-from oracle.plan.planner import Shortlist, build_planner, make_plan
-from oracle.rank.index import Ranker
 from oracle.registry.loader import Registry
 from oracle.render import Answer, Finding, findings_from, tool_of, trace_line
-from oracle.sdk.crawl import BACKSTOP_NOTE, Crawler, CrawlOutcome, backstop
-from oracle.sdk.extract import build_extractor
-from oracle.sdk.hop import build_hop_planner
+from oracle.sdk.crawl import BACKSTOP_NOTE, backstop
 from oracle.sdk.summarize import summarize
-from oracle.skills.loader import load_skills, render, select
-from oracle.timewin import TimeWindow, default_builtins, resolve_window
+from oracle.strategy import Context, Outcome, strategy_for
 from oracle.workflows.protocol import AskEntry, Trace, enter_ask
 from oracle.workflows.runner import call_scope
 
-SKILLS = load_skills(REPO_ROOT / "skills")
-MAX_STEPS = {"quick": 1, "standard": 12, "deep": 12}
 DEEP_BUDGET = 200_000  # model tokens per deep call unless --budget or ORACLE_DEEP_BUDGET says
-MAX_REPLANS = 2
 
 
 @dataclass
@@ -98,65 +82,24 @@ class _Meta(TypedDict):
     wall_ms: int
 
 
-def now_in(tz: str | None) -> datetime:
-    return datetime.now(ZoneInfo(tz)) if tz else datetime.now().astimezone()
-
-
 @dataclass
 class _Call:
-    req: AskRequest
-    cfg: Config
-    registry: Registry
-    models: Models
-    budget: Budget
-    """The tier's budget; every model call goes through it."""
+    ctx: Context
     trace: Trace
     """This call's link in the guard's chain."""
     asked: str
     """The level the caller asked for, before --script raised it."""
-    call_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     notes: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
-    plan: Plan | None = None
-    replans: int = 0
-    window: TimeWindow | None = None
-    shortlist: Shortlist = field(default_factory=lambda: Shortlist([]))
-    step_ids: set[str] = field(default_factory=set)
-    """Plan-level step ids used so far (plan and replans), which later steps may bind to."""
-    runner: PlanRunner | None = None
-    crawl: CrawlOutcome | None = None
-    script: ScriptRun | None = None
 
     @property
     def session(self) -> str:
-        return self.req.session or f"adhoc-{self.call_id}"
+        return self.ctx.req.session or f"adhoc-{self.ctx.call_id}"
 
     @property
     def level(self) -> str:
-        return self.req.level
-
-    def resolve_models(self) -> None:
-        """Fill every role this level needs now, so a missing model setting fails before any
-        tool runs (ConfigError, exit 2) instead of half way through."""
-        m = self.models
-        m.planner = m.planner or resolve_model(self.cfg.model("planner"))
-        if self.level == "standard":
-            m.checker = m.checker or resolve_model(self.cfg.model("planner"))
-        if self.level in ("standard", "deep"):
-            m.distiller = m.distiller or resolve_model(self.cfg.model("extract"))
-        if self.level == "deep":
-            self._resolve_deep()
-
-    def _resolve_deep(self) -> None:
-        m = self.models
-        m.extractor = m.extractor or m.distiller
-        m.reducer = m.reducer or m.planner
-        if self.req.script and m.scripter is None:
-            if "deep" not in self.cfg.models:
-                self.notes.append("note: no deep model is set; the planner model wrote the script")
-            deep = self.cfg.models.get("deep")
-            m.scripter = resolve_model(deep) if deep else m.planner
+        return self.ctx.level
 
 
 LEVELS = ("quick", "standard", "deep")
@@ -181,58 +124,44 @@ async def ask(
     entry = entry or enter_ask(None, req.question, req.level, req.script)
     req, notes = _reconcile(replace(req, level=entry.level, script=entry.script))
     budget = _budget(req, cfg, stop)
-    call = _Call(req, cfg, registry, models, budget, entry.trace, entry.asked)
-    call.notes += [*entry.notes, *notes]
     with call_scope(cfg, registry, entry.trace, models) as executor:
-        return await _run(call, executor)
+        ctx = Context.build(req, cfg, registry, models, budget, executor)
+        call = _Call(ctx, entry.trace, entry.asked, notes=[*entry.notes, *notes])
+        return await _run(call)
 
 
-async def _run(call: _Call, executor: Executor) -> Answer:
-    req, cfg, registry = call.req, call.cfg, call.registry
-    now = now_in(cfg.timezone)
-    call.window = resolve_window(req.question, now)
-    ranker = Ranker(registry)
-    call.shortlist = _shortlist(ranker, req.question, req)
-    if not call.shortlist.allowed:
+async def _run(call: _Call) -> Answer:
+    ctx = call.ctx
+    if not ctx.shortlist.allowed:
         call.gaps.append("no active tool matches the question or --scope")
-        return await _finish(call, [])
-    call.resolve_models()
-    runner = call.runner = _runner(call, executor, now)
-    if req.script:
-        return await _finish(call, await _script(call, runner), runner)
-    return await _planned(call, ranker, runner, now)
+        return await _finish(call, Outcome())
+    call.notes += _resolve_models(ctx)
+    return await _finish(call, await strategy_for(ctx.level, ctx.req.script).run(ctx))
 
 
-async def _planned(call: _Call, ranker: Ranker, runner: PlanRunner, now: datetime) -> Answer:
-    """Plan, run, then check and replan (standard) or crawl (deep)."""
-    req = call.req
-    assert call.models.planner is not None
-    planner = build_planner(call.models.planner)
-    try:
-        plan = await make_plan(
-            planner,
-            question=req.question,
-            intent=req.intent,
-            shortlist=call.shortlist,
-            registry=call.registry,
-            max_steps=MAX_STEPS[call.level],
-            now=now,
-            window=call.window,
-            budget=call.budget,
-            breadth=req.breadth,
-            guidance=_guidance(call, "planner", call.shortlist),
-        )
-    except Exception as exc:  # any model or transport failure is reported, never a traceback
-        call.failures.append(f"planner: {type(exc).__name__}: {exc}")
-        return await _finish(call, [])
-    call.plan = plan
-    call.step_ids = {s.id for s in plan.steps}
-    runs = await runner.run(plan.steps)
-    if call.level == "standard":
-        runs = await _check_loop(call, ranker, runner, runs)
-    if call.level == "deep":
-        runs = await _crawl(call, ranker, runner, runs)
-    return await _finish(call, runs, runner)
+def _resolve_models(ctx: Context) -> list[str]:
+    """Fill every role this level needs now, so a missing model setting fails before any tool
+    runs (ConfigError, exit 2) instead of half way through."""
+    m, cfg = ctx.models, ctx.cfg
+    m.planner = m.planner or resolve_model(cfg.model("planner"))
+    if ctx.level == "standard":
+        m.checker = m.checker or resolve_model(cfg.model("planner"))
+    if ctx.level in ("standard", "deep"):
+        m.distiller = m.distiller or resolve_model(cfg.model("extract"))
+    return _resolve_deep(ctx) if ctx.level == "deep" else []
+
+
+def _resolve_deep(ctx: Context) -> list[str]:
+    m, cfg = ctx.models, ctx.cfg
+    m.extractor = m.extractor or m.distiller
+    m.reducer = m.reducer or m.planner
+    if not ctx.req.script or m.scripter is not None:
+        return []
+    deep = cfg.models.get("deep")
+    m.scripter = resolve_model(deep) if deep else m.planner
+    if "deep" in cfg.models:
+        return []
+    return ["note: no deep model is set; the planner model wrote the script"]
 
 
 def _budget(req: AskRequest, cfg: Config, stop: asyncio.Event | None) -> Budget:
@@ -247,63 +176,6 @@ def _budget(req: AskRequest, cfg: Config, stop: asyncio.Event | None) -> Budget:
     return Budget.for_tier("deep", tokens, stop)
 
 
-async def _crawl(
-    call: _Call, ranker: Ranker, runner: PlanRunner, runs: list[StepRun]
-) -> list[StepRun]:
-    assert call.models.extractor and call.models.planner
-    crawler = Crawler(
-        question=call.req.question,
-        registry=call.registry,
-        runner=runner,
-        extractor=build_extractor(call.models.extractor),
-        hop_planner=build_hop_planner(call.models.planner),
-        budget=call.budget,
-        shortlist_for=lambda query: _shortlist(ranker, query, call.req),
-        step_ids=call.step_ids,
-        depth=call.req.depth,
-    )
-    try:
-        outcome = await crawler.run(runs)
-    except Interrupted:  # the Ctrl-C also reached the model process the hop waited on
-        outcome = crawler.outcome
-        outcome.stopped = "interrupted"
-    except Exception as exc:  # a failed hop keeps what the crawl already found
-        outcome = crawler.outcome
-        outcome.stopped = f"hop failed ({type(exc).__name__})"
-        call.notes.append(f"note: crawl stopped: {type(exc).__name__}: {exc}")
-    call.crawl = outcome
-    return outcome.runs
-
-
-async def _script(call: _Call, runner: PlanRunner) -> list[StepRun]:
-    assert call.models.scripter is not None
-    path = ScriptPath(
-        question=call.req.question,
-        when=_when(call),
-        shortlist=call.shortlist,
-        registry=call.registry,
-        home=call.cfg.home,
-        runner=runner,
-        step_ids=call.step_ids,
-        budget=call.budget,
-        call_id=call.call_id,
-    )
-    runs = await path.go(call.models.scripter)
-    call.script = path.run
-    call.failures += path.failures
-    call.gaps += path.gaps
-    return runs
-
-
-def _code(call: _Call) -> str | None:
-    return call.script.script.code if call.script else None
-
-
-def _when(call: _Call) -> str:
-    now = now_in(call.cfg.timezone).isoformat(timespec="minutes")
-    return call.window.describe() if call.window else now
-
-
 def _reconcile(req: AskRequest) -> tuple[AskRequest, list[str]]:
     """A request the tier cannot honour as asked, adjusted with a note (the tier and --script
     are settled by `enter_ask`)."""
@@ -313,196 +185,113 @@ def _reconcile(req: AskRequest) -> tuple[AskRequest, list[str]]:
     return req, []
 
 
-def _runner(call: _Call, executor: Executor, now: datetime) -> PlanRunner:
-    builtins = call.window.builtins() if call.window else default_builtins(now)
-    return PlanRunner(call.registry, executor, builtins=builtins)
+async def _finish(call: _Call, out: Outcome) -> Answer:
+    call.notes += out.notes
+    call.failures += out.failures
+    call.gaps += out.gaps
+    if call.level == "deep":
+        findings, confidence, refine = await _deep_summary(call, out)
+    elif call.level == "standard":
+        findings, confidence, refine = await _distill(call, out)
+    else:
+        findings = findings_from(out.runs, call.ctx.registry)
+        confidence, refine = ("medium" if findings else "low"), []
+        call.gaps.append("quick tier: no completeness check was run")
+    answer = _answer(call, out, findings, confidence, refine)
+    await _log(call, answer, out)
+    return answer
 
 
-def _shortlist(ranker: Ranker, query: str, req: AskRequest) -> Shortlist:
-    tools = ranker.rank(query, scope=req.scope, prefer=req.prefer, breadth=req.breadth)
-    recipes = ranker.rank_recipes(query)
-    if req.scope:
-        active = set(ranker.registry.tools)
-        recipes = [r for r in recipes if _recipe_tools(ranker, r) & active <= set(req.scope)]
-    return Shortlist(tools, recipes)
-
-
-def _recipe_tools(ranker: Ranker, name: str) -> set[str]:
-    return {tool_of(s.op) for s in ranker.registry.recipes[name].steps}
-
-
-async def _check_loop(
-    call: _Call, ranker: Ranker, runner: PlanRunner, runs: list[StepRun]
-) -> list[StepRun]:
-    assert call.plan is not None
-    assert call.models.checker is not None
-    checker = build_checker(call.models.checker)
-    planned = len(call.plan.steps)
-    while not call.budget.out_of_time():
-        last = call.replans >= MAX_REPLANS or planned >= MAX_STEPS["standard"]
-        conditioned = _conditioned(call, ranker, runs)
-        try:
-            check = await run_check(
-                checker,
-                question=call.req.question,
-                intent=call.req.intent,
-                plan=call.plan,
-                window=call.window,
-                runs=runs,
-                shortlist=conditioned,
-                registry=call.registry,
-                max_steps=0 if last else MAX_STEPS["standard"] - planned,
-                budget=call.budget,
-                earlier=call.step_ids,
-                guidance=_guidance(call, "check", conditioned),
-            )
-        except Exception as exc:  # a failed check leaves the results as they are
-            call.notes.append(f"note: completeness check failed ({type(exc).__name__}: {exc})")
-            return runs
-        call.gaps = list(check.gaps)
-        if not _replan(call, check, planned):
-            return runs
-        call.replans += 1
-        planned += len(check.next_steps)
-        call.step_ids |= {s.id for s in check.next_steps}
-        runs = runs + await runner.run(check.next_steps, round_=call.replans)
-    call.notes.append(f"note: stopped checking at the {call.budget.bounds.follow_up_s:g} s bound")
-    return runs
-
-
-def _guidance(call: _Call, role: str, shortlist: Shortlist) -> str:
-    tools = [t.tool for t in shortlist.tools]
-    chosen = select(SKILLS, role, tools, call.registry, call.req.question)
-    if chosen and role == "planner":
-        call.notes.append(f"skills: {', '.join(s.name for s in chosen)}")
-    return render(chosen)
-
-
-def _replan(call: _Call, check: Check, planned: int) -> bool:
-    if check.sufficient or check.complete or not check.next_steps:
-        return False
-    if call.replans >= MAX_REPLANS or planned >= MAX_STEPS["standard"]:
-        call.notes.append("note: the check wanted more steps; replan limit reached")
-        return False
-    return True
-
-
-def _conditioned(call: _Call, ranker: Ranker, runs: list[StepRun]) -> Shortlist:
-    """Re-rank on the question plus what was found, so a result mentioning a ticket brings
-    acli into reach even if the question never mentioned tickets."""
-    seen = [summary_of(rec, []) for run in runs if run.result.ok for rec in run.result.records[:5]]
-    query = " ".join([call.req.question, *call.gaps, *seen])[:4000]
-    return _shortlist(ranker, query, call.req)
-
-
-async def _distill(call: _Call, runs: list[StepRun]) -> tuple[list[Finding], str, list[str]]:
+async def _distill(call: _Call, out: Outcome) -> tuple[list[Finding], str, list[str]]:
     """(findings, confidence, refine). Falls back to summary fields if distill fails."""
-    found = [r for r in runs if r.found]
+    found = out.summary_runs
     if not found:
         return [], "low", []
-    distilled = await _try_distill(call, found)
+    distilled = await _try_distill(call, out, found)
     if distilled is None:
-        return findings_from(found, call.registry), "low", []
+        return findings_from(found, call.ctx.registry), "low", []
     source = {p: run.op for run in found for p in run.result.pointers}
     call.gaps = list(dict.fromkeys(call.gaps + distilled.gaps))
     findings = [Finding(f.text, f.pointer, source[f.pointer]) for f in distilled.findings]
     return findings, distilled.confidence, distilled.refine
 
 
-async def _try_distill(call: _Call, found: list[StepRun]) -> Distilled | None:
+async def _try_distill(call: _Call, out: Outcome, found: list[StepRun]) -> Distilled | None:
     """None means use raw findings: past the deadline, or distill failed."""
-    if call.budget.late_for_summary():
-        late = call.budget.bounds.summarise_by_s
+    budget = call.ctx.budget
+    if budget.late_for_summary():
+        late = budget.bounds.summarise_by_s
         call.notes.append(f"note: past {late:g} s, so findings are raw (no distill)")
         return None
     try:
-        return await _run_distill(call, found)
+        return await _run_distill(call, out, found)
     except Exception as exc:
         call.notes.append(f"note: distill failed ({type(exc).__name__}); findings are raw")
         return None
 
 
-async def _run_distill(call: _Call, found: list[StepRun]) -> Distilled:
-    assert call.models.distiller is not None
+async def _run_distill(call: _Call, out: Outcome, found: list[StepRun]) -> Distilled:
+    ctx = call.ctx
+    assert ctx.models.distiller is not None
     return await run_distill(
-        build_distiller(call.models.distiller),
-        question=call.req.question,
-        interpretation=call.plan.interpretation if call.plan else "",
-        when=_when(call),
-        breadth=_breadth(call),
+        build_distiller(ctx.models.distiller),
+        question=ctx.req.question,
+        interpretation=out.interpretation,
+        when=ctx.when(),
+        breadth=_breadth(ctx, out),
         check_gaps=call.gaps,
         runs=found,
-        registry=call.registry,
-        budget=call.budget,
+        registry=ctx.registry,
+        budget=ctx.budget,
     )
 
 
-def _breadth(call: _Call) -> bool:
+def _breadth(ctx: Context, out: Outcome) -> bool:
     """The plan asked for breadth, or a breadth recipe ran (in the plan or any replan)."""
-    used = call.runner.recipes_used if call.runner else []
-    planned = call.req.breadth or bool(call.plan and call.plan.breadth)
-    return planned or any(call.registry.recipes[r].breadth for r in used)
+    planned = ctx.req.breadth or bool(out.plan and out.plan.breadth)
+    return planned or any(ctx.registry.recipes[r].breadth for r in ctx.runner.recipes_used)
 
 
-async def _finish(call: _Call, runs: list[StepRun], runner: PlanRunner | None = None) -> Answer:
-    if call.level == "deep":
-        findings, confidence, refine = await _deep_summary(call, runs)
-    elif call.level == "standard":
-        findings, confidence, refine = await _distill(call, runs)
-    else:
-        findings = findings_from(runs, call.registry)
-        confidence, refine = ("medium" if findings else "low"), []
-        call.gaps.append("quick tier: no completeness check was run")
-    answer = _answer(call, runs, findings, confidence, refine, runner)
-    await _log(call, answer, runs)
-    return answer
-
-
-async def _deep_summary(call: _Call, runs: list[StepRun]) -> tuple[list[Finding], str, list[str]]:
+async def _deep_summary(call: _Call, out: Outcome) -> tuple[list[Finding], str, list[str]]:
     """Map-reduce over everything the crawl found, or what the script reported; raw findings if
     that fails."""
-    found = _summary_input(call, runs)
+    found = out.summary_runs
     if not found:
         return [], "low", []
+    registry = call.ctx.registry
     try:
-        distilled, source = await _summarize(call, found)
+        distilled, source = await _summarize(call, out, found)
     except Interrupted:
         # the first Ctrl-C landed during the summary and reached its model processes; the user
         # asked to stop and see what was found, so summarise once more (calls started after the
         # stop are not killed by it, so this happens at most once)
-        return await _deep_summary(call, runs)
+        return await _deep_summary(call, out)
     except Exception as exc:
         call.notes.append(f"note: summary failed ({type(exc).__name__}); findings are raw")
-        return findings_from(found, call.registry), "low", []
+        return findings_from(found, registry), "low", []
     call.gaps = list(dict.fromkeys(call.gaps + distilled.gaps))
     findings = [Finding(f.text, f.pointer, source.get(f.pointer, "")) for f in distilled.findings]
-    extra = backstop(found, findings, call.registry)
+    extra = backstop(found, findings, registry)
     call.notes += [f"note: {len(extra)} {BACKSTOP_NOTE}"] if extra else []
     return findings + extra, distilled.confidence, distilled.refine
 
 
-def _summary_input(call: _Call, runs: list[StepRun]) -> list[StepRun]:
-    """What the script reported, if it reported anything; else every result found."""
-    runs = call.script.summary_runs if call.script and call.script.summary_runs else runs
-    return [r for r in runs if r.found]
-
-
-async def _summarize(call: _Call, found: list[StepRun]) -> tuple[Distilled, dict[str, str]]:
-    assert call.models.distiller and call.models.reducer
-    interpretation = call.plan.interpretation if call.plan else ""
-    if call.script:
-        interpretation = call.script.script.interpretation
-    async with call.budget.summary() as spend:  # on timeout the findings are raw
+async def _summarize(
+    call: _Call, out: Outcome, found: list[StepRun]
+) -> tuple[Distilled, dict[str, str]]:
+    ctx = call.ctx
+    assert ctx.models.distiller and ctx.models.reducer
+    async with ctx.budget.summary() as spend:  # on timeout the findings are raw
         return await summarize(
-            question=call.req.question,
-            interpretation=interpretation,
-            when=_when(call),
-            breadth=_breadth(call),
+            question=ctx.req.question,
+            interpretation=out.interpretation,
+            when=ctx.when(),
+            breadth=_breadth(ctx, out),
             gaps=call.gaps,
             runs=found,
-            registry=call.registry,
-            mapper=call.models.distiller,
-            reducer=call.models.reducer,
+            registry=ctx.registry,
+            mapper=ctx.models.distiller,
+            reducer=ctx.models.reducer,
             budget=spend,
         )
 
@@ -516,40 +305,39 @@ def _gaps(call: _Call, runs: list[StepRun], findings: list[Finding]) -> list[str
 
 
 def _answer(
-    call: _Call,
-    runs: list[StepRun],
-    findings: list[Finding],
-    confidence: str,
-    refine: list[str],
-    runner: PlanRunner | None,
+    call: _Call, out: Outcome, findings: list[Finding], confidence: str, refine: list[str]
 ) -> Answer:
+    ctx, runs = call.ctx, out.runs
     ran = [r for r in runs if r.ran]
     failures = call.failures + [
         f"{r.op} ({r.result.status}): {r.result.error}"
         for r in runs
         if r.result.status in ("error", "not_configured", "invalid")
     ]
-    recipes = list(dict.fromkeys(runner.recipes_used if runner else []))
-    breadth = _breadth(call)
+    breadth = _breadth(ctx, out)
     findings = _grouped(findings) if breadth else findings
     return Answer(
-        call_id=call.call_id,
+        call_id=ctx.call_id,
         session=call.session,
         level=call.level,
         findings=findings,
         failures=failures,
         confidence="medium" if failures and confidence == "high" else confidence,
         gaps=_gaps(call, runs, findings),
-        trace=_trace(call, runs),
+        trace=_trace(ctx, out),
         notes=_notes(call, runs),
         refine=refine,
         breadth=breadth,
         ops_run=[r.op for r in ran],
-        recipes=recipes,
-        **_coverage(call, runs),
-        **_meta(call),
-        **_crawl_fields(call),
-        script=_code(call),
+        recipes=list(dict.fromkeys(ctx.runner.recipes_used)),
+        **_coverage(ctx.registry, runs),
+        **_meta(ctx, out),
+        hops=out.hops,
+        terms_searched=len(out.searched),
+        unexpanded=out.unexpanded,
+        stopped=out.stopped,
+        cost=ctx.budget.line() if call.level == "deep" else None,  # after the summary's spend
+        script=out.script,
     )
 
 
@@ -561,35 +349,17 @@ def _notes(call: _Call, runs: list[StepRun]) -> list[str]:
     ]
 
 
-class _CrawlFields(TypedDict):
-    hops: int
-    terms_searched: int
-    unexpanded: list[str]
-    stopped: str | None
-    cost: str | None
-
-
-def _crawl_fields(call: _Call) -> _CrawlFields:
-    crawl = call.crawl
+def _meta(ctx: Context, out: Outcome) -> _Meta:
+    usage = ctx.budget.usage
     return {
-        "hops": crawl.hops if crawl else 0,
-        "terms_searched": len(crawl.searched) if crawl else 0,
-        "unexpanded": crawl.unexpanded if crawl else [],
-        "stopped": crawl.stopped if crawl else None,
-        "cost": call.budget.line() if call.level == "deep" else None,
-    }
-
-
-def _meta(call: _Call) -> _Meta:
-    return {
-        "time_window": call.window.describe() if call.window else None,
-        "replans": call.replans,
-        "shortlist": [t.tool for t in call.shortlist.tools],
-        "scored": [t.tool for t in call.shortlist.tools if t.score > 0 or t.pinned],
-        "tokens_in": call.budget.usage.tokens_in,
-        "tokens_out": call.budget.usage.tokens_out,
-        "model_calls": call.budget.usage.model_calls,
-        "wall_ms": int(call.budget.elapsed() * 1000),
+        "time_window": ctx.window.describe() if ctx.window else None,
+        "replans": out.replans,
+        "shortlist": [t.tool for t in ctx.shortlist.tools],
+        "scored": [t.tool for t in ctx.shortlist.tools if t.score > 0 or t.pinned],
+        "tokens_in": usage.tokens_in,
+        "tokens_out": usage.tokens_out,
+        "model_calls": usage.model_calls,
+        "wall_ms": int(ctx.budget.elapsed() * 1000),
     }
 
 
@@ -599,14 +369,14 @@ def _grouped(findings: list[Finding]) -> list[Finding]:
     return sorted(findings, key=lambda f: order.index(tool_of(f.source)))
 
 
-def _coverage(call: _Call, runs: list[StepRun]) -> _Coverage:
+def _coverage(registry: Registry, runs: list[StepRun]) -> _Coverage:
     """Computed from execution, never by a model."""
     ran = [r for r in runs if r.ran]
     ok = [r for r in ran if r.result.ok]
     return {
         "searched": sorted({tool_of(r.op) for r in ok}),
-        "not_searched": sorted(set(call.registry.tools) - {tool_of(r.op) for r in ran}),
-        "unavailable": sorted(set(call.registry.inactive) | _with_status(runs, "unavailable")),
+        "not_searched": sorted(set(registry.tools) - {tool_of(r.op) for r in ran}),
+        "unavailable": sorted(set(registry.inactive) | _with_status(runs, "unavailable")),
         "no_match": _no_match(ok),
         "skipped": [f"{r.op} ({r.result.error})" for r in runs if r.result.status == "skipped"],
         "step_results": _step_results(runs),
@@ -631,35 +401,35 @@ def _no_match(ok: list[StepRun]) -> list[str]:
     return sorted({r.op for r in ok} - found)
 
 
-def _trace(call: _Call, runs: list[StepRun]) -> list[str]:
-    lines = [f"time: {call.window.describe()}"] if call.window else []
-    if call.script:
-        lines.append(call.script.trace_line())
+def _trace(ctx: Context, out: Outcome) -> list[str]:
+    lines = [f"time: {ctx.window.describe()}"] if ctx.window else []
+    lines += out.trace
     current = 0
-    for run in runs:
+    for run in out.runs:
         if run.round != current:
             current = run.round
-            lines.append(f"{'hop' if call.level == 'deep' else 'replan'} {current}:")
+            lines.append(f"{out.round_name} {current}:")
         prefix = f"[{run.recipe}] " if run.recipe else ""
         lines.append(prefix + trace_line(run))
     return lines
 
 
-async def _log(call: _Call, answer: Answer, runs: list[StepRun]) -> None:
-    async with open_store(call.cfg.log_path) as store:
+async def _log(call: _Call, answer: Answer, out: Outcome) -> None:
+    ctx = call.ctx
+    async with open_store(ctx.cfg.log_path) as store:
         await store.record_call(
             CallRecord(
                 call_id=answer.call_id,
                 session=answer.session,
-                query=call.req.question,
-                intent=call.req.intent,
+                query=ctx.req.question,
+                intent=ctx.req.intent,
                 level=call.asked,  # as requested; ran_level is what ran
                 ranked_tools=[
                     {"tool": t.tool, "score": t.score, "pinned": t.pinned, "matched": t.matched_ops}
-                    for t in call.shortlist.tools
+                    for t in ctx.shortlist.tools
                 ]
-                + [{"recipe": r} for r in call.shortlist.recipes],
-                plan=call.plan.model_dump() if call.plan else None,
+                + [{"recipe": r} for r in ctx.shortlist.recipes],
+                plan=out.plan.model_dump() if out.plan else None,
                 wall_ms=answer.wall_ms,
                 tokens_in=answer.tokens_in,
                 tokens_out=answer.tokens_out,
@@ -669,13 +439,12 @@ async def _log(call: _Call, answer: Answer, runs: list[StepRun]) -> None:
                 gaps=answer.gaps + answer.failures,
                 ran_level=answer.level,
                 replans=answer.replans,
-                script=_code(call),
+                script=out.script,
                 trace_id=call.trace.trace_id,
                 depth=call.trace.depth,
             )
         )
-        report = [call.script.report_run] if call.script and call.script.report_run else []
-        for run in runs + report:
+        for run in out.runs + out.logged:
             result = run.result
             if run.same_as:  # logged as a marker so reports do not count the lookup twice
                 result = replace(
