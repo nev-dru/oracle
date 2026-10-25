@@ -9,9 +9,10 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.models import Model
 
+from oracle.budget import Budget
 from oracle.plan.digest import DATA_CLOSE, DATA_OPEN, DATA_RULE, defang
 from oracle.plan.models import Step, step_errors
-from oracle.plan.planner import PLAN_RETRIES, Shortlist, Usage, prompt, render_shortlist
+from oracle.plan.planner import PLAN_RETRIES, Shortlist, prompt, render_shortlist
 from oracle.registry.loader import Registry
 from oracle.sdk.extract import Term, key
 
@@ -70,7 +71,7 @@ async def plan_hop(
     shortlist: Shortlist,
     registry: Registry,
     earlier: set[str],
-    usage: Usage,
+    budget: Budget,
 ) -> HopPlan:
     listed = "\n".join(f"- {defang(t.value)}: {defang(t.description)}" for t in terms)
     lines = [
@@ -91,6 +92,5 @@ async def plan_hop(
         earlier,
         STEPS_PER_TERM * len(terms),
     )
-    result = await agent.run("\n".join(lines), deps=deps)
-    usage.add(result.usage)
+    result = await budget.model(agent.run("\n".join(lines), deps=deps))
     return result.output

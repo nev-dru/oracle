@@ -7,9 +7,7 @@ summary either way.
 """
 
 import asyncio
-import time
 import uuid
-from collections.abc import Awaitable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TypedDict
@@ -17,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic_ai.models import Model
 
+from oracle.budget import Budget, Interrupted, parse_budget
 from oracle.config import REPO_ROOT, Config, ConfigError
 from oracle.deep.scripted import ScriptPath, ScriptRun
 from oracle.exec.dag import PlanRunner, StepRun
@@ -27,11 +26,10 @@ from oracle.plan.check import Check, build_checker, run_check
 from oracle.plan.digest import summary_of
 from oracle.plan.distill import Distilled, build_distiller, run_distill
 from oracle.plan.models import Plan
-from oracle.plan.planner import Shortlist, Usage, build_planner, make_plan
+from oracle.plan.planner import Shortlist, build_planner, make_plan
 from oracle.rank.index import Ranker
 from oracle.registry.loader import Registry
 from oracle.render import Answer, Finding, findings_from, tool_of, trace_line
-from oracle.sdk.budget import Budget, parse_budget
 from oracle.sdk.crawl import BACKSTOP_NOTE, Crawler, CrawlOutcome, backstop
 from oracle.sdk.extract import build_extractor
 from oracle.sdk.hop import build_hop_planner
@@ -44,13 +42,7 @@ from oracle.workflows.runner import WorkflowHost
 SKILLS = load_skills(REPO_ROOT / "skills")
 MAX_STEPS = {"quick": 1, "standard": 12, "deep": 12}
 DEEP_BUDGET = 200_000  # model tokens per deep call unless --budget or ORACLE_DEEP_BUDGET says
-SUMMARY_RESERVE = 20_000
-DEEP_WALL_S = 300.0
 MAX_REPLANS = 2
-WALL_S = 60.0  # no new check after this; DESIGN's bound for standard
-MODEL_CALL_S = 90.0  # any single model call, whatever the provider
-DISTILL_BY_S = 90.0  # past this, findings are raw summary fields rather than a late distill
-DEEP_SUMMARY_S = 240.0  # the deep summary, map batches and merge together
 
 
 @dataclass
@@ -117,8 +109,8 @@ class _Call:
     registry: Registry
     models: Models
     call_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    started: float = field(default_factory=time.monotonic)
-    usage: Usage = field(default_factory=Usage)
+    budget: Budget = field(default_factory=Budget)
+    """The tier's budget, set once the level is settled; every model call goes through it."""
     notes: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
@@ -129,9 +121,7 @@ class _Call:
     step_ids: set[str] = field(default_factory=set)
     """Plan-level step ids used so far (plan and replans), which later steps may bind to."""
     runner: PlanRunner | None = None
-    budget: Budget | None = None
     crawl: CrawlOutcome | None = None
-    stop: asyncio.Event | None = None
     script: ScriptRun | None = None
     trace: Trace | None = None
     asked: str = "standard"
@@ -185,8 +175,9 @@ async def ask(
         raise ValueError(f"level must be one of {LEVELS}, got {req.level!r}")
     if not isinstance(models, Models):
         models = Models(planner=models)  # a bare model is the planner
-    call = _Call(req, cfg, registry, models, stop=stop, asked=req.level)
+    call = _Call(req, cfg, registry, models, asked=req.level)
     req = _reconcile(call, trace)
+    call.budget = _budget(call, stop)
     # the root call is the chain's first link, so a tool that asks the same question again is
     # a cycle; a nested call arrives with its link already entered
     call.trace = (
@@ -206,8 +197,6 @@ async def ask(
 
 async def _run(call: _Call) -> Answer:
     req, cfg, registry = call.req, call.cfg, call.registry
-    if req.level == "deep":
-        call.budget = _deep_budget(call)
     now = now_in(cfg.timezone)
     call.window = resolve_window(req.question, now)
     ranker = Ranker(registry)
@@ -228,7 +217,7 @@ async def _planned(call: _Call, ranker: Ranker, runner: PlanRunner, now: datetim
     assert call.models.planner is not None
     planner = build_planner(call.models.planner)
     try:
-        outcome = await _bounded(make_plan(
+        plan = await make_plan(
             planner,
             question=req.question,
             intent=req.intent,
@@ -237,16 +226,16 @@ async def _planned(call: _Call, ranker: Ranker, runner: PlanRunner, now: datetim
             max_steps=MAX_STEPS[call.level],
             now=now,
             window=call.window,
+            budget=call.budget,
             breadth=req.breadth,
             guidance=_guidance(call, "planner", call.shortlist),
-        ))  # fmt: skip
+        )
     except Exception as exc:  # any model or transport failure is reported, never a traceback
         call.failures.append(f"planner: {type(exc).__name__}: {exc}")
         return await _finish(call, [])
-    call.plan = outcome.plan
-    call.step_ids = {s.id for s in outcome.plan.steps}
-    call.usage.merge(outcome.usage)
-    runs = await runner.run(outcome.plan.steps)
+    call.plan = plan
+    call.step_ids = {s.id for s in plan.steps}
+    runs = await runner.run(plan.steps)
     if call.level == "standard":
         runs = await _check_loop(call, ranker, runner, runs)
     if call.level == "deep":
@@ -254,23 +243,22 @@ async def _planned(call: _Call, ranker: Ranker, runner: PlanRunner, now: datetim
     return await _finish(call, runs, runner)
 
 
-def _deep_budget(call: _Call) -> Budget:
-    """--budget, else ORACLE_DEEP_BUDGET, else DEEP_BUDGET. `unlimited` only when the caller or
-    the config says so; it drops the wall-clock bound too, leaving hop depth as the limit."""
+def _budget(call: _Call, stop: asyncio.Event | None) -> Budget:
+    """The tier's bounds; at deep, tokens from --budget, else ORACLE_DEEP_BUDGET, else
+    DEEP_BUDGET (`unlimited` only when the caller or the config says so)."""
+    if call.level != "deep":
+        return Budget.for_tier(call.level, stop=stop)
     try:
         tokens = parse_budget(call.req.budget or call.cfg.deep_budget, DEEP_BUDGET)
     except ValueError as exc:  # --budget is checked by the CLI; this is the config's value
         raise ConfigError(f"deep budget (ORACLE_DEEP_BUDGET or deep_budget): {exc}") from None
-    wall = None if tokens is None else DEEP_WALL_S
-    # a small budget keeps a smaller share back: its crawl is small, and so is its summary
-    reserve = SUMMARY_RESERVE if tokens is None else min(SUMMARY_RESERVE, tokens // 4)
-    return Budget(tokens=tokens, reserve=reserve, wall_s=wall, usage=call.usage)
+    return Budget.for_tier("deep", tokens, stop)
 
 
 async def _crawl(
     call: _Call, ranker: Ranker, runner: PlanRunner, runs: list[StepRun]
 ) -> list[StepRun]:
-    assert call.budget is not None and call.models.extractor and call.models.planner
+    assert call.models.extractor and call.models.planner
     crawler = Crawler(
         question=call.req.question,
         registry=call.registry,
@@ -280,20 +268,17 @@ async def _crawl(
         budget=call.budget,
         shortlist_for=lambda query: _shortlist(ranker, query, call.req),
         step_ids=call.step_ids,
-        usage=call.usage,
         depth=call.req.depth,
-        stop=call.stop,
-        model_s=MODEL_CALL_S,
     )
     try:
         outcome = await crawler.run(runs)
+    except Interrupted:  # the Ctrl-C also reached the model process the hop waited on
+        outcome = crawler.outcome
+        outcome.stopped = "interrupted"
     except Exception as exc:  # a failed hop keeps what the crawl already found
         outcome = crawler.outcome
-        if _stopping(call):  # the Ctrl-C also reached the model process the hop waited on
-            outcome.stopped = "interrupted"
-        else:
-            outcome.stopped = f"hop failed ({type(exc).__name__})"
-            call.notes.append(f"note: crawl stopped: {type(exc).__name__}: {exc}")
+        outcome.stopped = f"hop failed ({type(exc).__name__})"
+        call.notes.append(f"note: crawl stopped: {type(exc).__name__}: {exc}")
     call.crawl = outcome
     return outcome.runs
 
@@ -309,9 +294,7 @@ async def _script(call: _Call, runner: PlanRunner) -> list[StepRun]:
         runner=runner,
         step_ids=call.step_ids,
         budget=call.budget,
-        usage=call.usage,
         call_id=call.call_id,
-        bound=_bounded,
     )
     runs = await path.go(call.models.scripter)
     call.script = path.run
@@ -355,11 +338,6 @@ def _runner(call: _Call, now: datetime) -> PlanRunner:
     return PlanRunner(call.registry, executor, builtins=builtins)
 
 
-async def _bounded[T](work: Awaitable[T]) -> T:
-    async with asyncio.timeout(MODEL_CALL_S):
-        return await work
-
-
 def _shortlist(ranker: Ranker, query: str, req: AskRequest) -> Shortlist:
     tools = ranker.rank(query, scope=req.scope, prefer=req.prefer, breadth=req.breadth)
     recipes = ranker.rank_recipes(query)
@@ -380,11 +358,11 @@ async def _check_loop(
     assert call.models.checker is not None
     checker = build_checker(call.models.checker)
     planned = len(call.plan.steps)
-    while time.monotonic() - call.started <= WALL_S:
+    while not call.budget.out_of_time():
         last = call.replans >= MAX_REPLANS or planned >= MAX_STEPS["standard"]
         conditioned = _conditioned(call, ranker, runs)
         try:
-            check = await _bounded(run_check(
+            check = await run_check(
                 checker,
                 question=call.req.question,
                 intent=call.req.intent,
@@ -394,10 +372,10 @@ async def _check_loop(
                 shortlist=conditioned,
                 registry=call.registry,
                 max_steps=0 if last else MAX_STEPS["standard"] - planned,
-                usage=call.usage,
+                budget=call.budget,
                 earlier=call.step_ids,
                 guidance=_guidance(call, "check", conditioned),
-            ))  # fmt: skip
+            )
         except Exception as exc:  # a failed check leaves the results as they are
             call.notes.append(f"note: completeness check failed ({type(exc).__name__}: {exc})")
             return runs
@@ -408,7 +386,7 @@ async def _check_loop(
         planned += len(check.next_steps)
         call.step_ids |= {s.id for s in check.next_steps}
         runs = runs + await runner.run(check.next_steps, round_=call.replans)
-    call.notes.append(f"note: stopped checking at the {WALL_S:g} s bound")
+    call.notes.append(f"note: stopped checking at the {call.budget.bounds.follow_up_s:g} s bound")
     return runs
 
 
@@ -453,11 +431,12 @@ async def _distill(call: _Call, runs: list[StepRun]) -> tuple[list[Finding], str
 
 async def _try_distill(call: _Call, found: list[StepRun]) -> Distilled | None:
     """None means use raw findings: past the deadline, or distill failed."""
-    if time.monotonic() - call.started > DISTILL_BY_S:
-        call.notes.append(f"note: past {DISTILL_BY_S:g} s, so findings are raw (no distill)")
+    if call.budget.late_for_summary():
+        late = call.budget.bounds.summarise_by_s
+        call.notes.append(f"note: past {late:g} s, so findings are raw (no distill)")
         return None
     try:
-        return await _bounded(_run_distill(call, found))
+        return await _run_distill(call, found)
     except Exception as exc:
         call.notes.append(f"note: distill failed ({type(exc).__name__}); findings are raw")
         return None
@@ -474,7 +453,7 @@ async def _run_distill(call: _Call, found: list[StepRun]) -> Distilled:
         check_gaps=call.gaps,
         runs=found,
         registry=call.registry,
-        usage=call.usage,
+        budget=call.budget,
     )
 
 
@@ -505,27 +484,21 @@ async def _deep_summary(call: _Call, runs: list[StepRun]) -> tuple[list[Finding]
     found = _summary_input(call, runs)
     if not found:
         return [], "low", []
-    stopping = _stopping(call)
     try:
         distilled, source = await _summarize(call, found)
-    except Exception as exc:
-        if stopping or not _stopping(call):
-            call.notes.append(f"note: summary failed ({type(exc).__name__}); findings are raw")
-            return findings_from(found, call.registry), "low", []
-        # the first Ctrl-C landed during the summary and reached its model processes; the
-        # user asked to stop and see what was found, so summarise once more
+    except Interrupted:
+        # the first Ctrl-C landed during the summary and reached its model processes; the user
+        # asked to stop and see what was found, so summarise once more (calls started after the
+        # stop are not killed by it, so this happens at most once)
         return await _deep_summary(call, runs)
+    except Exception as exc:
+        call.notes.append(f"note: summary failed ({type(exc).__name__}); findings are raw")
+        return findings_from(found, call.registry), "low", []
     call.gaps = list(dict.fromkeys(call.gaps + distilled.gaps))
     findings = [Finding(f.text, f.pointer, source.get(f.pointer, "")) for f in distilled.findings]
     extra = backstop(found, findings, call.registry)
     call.notes += [f"note: {len(extra)} {BACKSTOP_NOTE}"] if extra else []
     return findings + extra, distilled.confidence, distilled.refine
-
-
-def _stopping(call: _Call) -> bool:
-    """The first Ctrl-C asked a deep crawl to stop. Model processes are Claude Code's own
-    children in the terminal's process group, so that Ctrl-C reaches them too."""
-    return call.stop is not None and call.stop.is_set()
 
 
 def _summary_input(call: _Call, runs: list[StepRun]) -> list[StepRun]:
@@ -539,7 +512,7 @@ async def _summarize(call: _Call, found: list[StepRun]) -> tuple[Distilled, dict
     interpretation = call.plan.interpretation if call.plan else ""
     if call.script:
         interpretation = call.script.script.interpretation
-    async with asyncio.timeout(DEEP_SUMMARY_S):  # on timeout the findings are raw
+    async with call.budget.summary() as spend:  # on timeout the findings are raw
         return await summarize(
             question=call.req.question,
             interpretation=interpretation,
@@ -550,7 +523,7 @@ async def _summarize(call: _Call, found: list[StepRun]) -> tuple[Distilled, dict
             registry=call.registry,
             mapper=call.models.distiller,
             reducer=call.models.reducer,
-            usage=call.usage,
+            budget=spend,
         )
 
 
@@ -623,7 +596,7 @@ def _crawl_fields(call: _Call) -> _CrawlFields:
         "terms_searched": len(crawl.searched) if crawl else 0,
         "unexpanded": crawl.unexpanded if crawl else [],
         "stopped": crawl.stopped if crawl else None,
-        "cost": call.budget.line() if call.budget else None,
+        "cost": call.budget.line() if call.level == "deep" else None,
     }
 
 
@@ -633,10 +606,10 @@ def _meta(call: _Call) -> _Meta:
         "replans": call.replans,
         "shortlist": [t.tool for t in call.shortlist.tools],
         "scored": [t.tool for t in call.shortlist.tools if t.score > 0 or t.pinned],
-        "tokens_in": call.usage.tokens_in,
-        "tokens_out": call.usage.tokens_out,
-        "model_calls": call.usage.model_calls,
-        "wall_ms": int((time.monotonic() - call.started) * 1000),
+        "tokens_in": call.budget.usage.tokens_in,
+        "tokens_out": call.budget.usage.tokens_out,
+        "model_calls": call.budget.usage.model_calls,
+        "wall_ms": int(call.budget.elapsed() * 1000),
     }
 
 

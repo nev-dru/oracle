@@ -10,13 +10,13 @@ from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from oracle.ask import AskRequest, Models, ask
+from oracle.budget import Budget
 from oracle.config import Config
 from oracle.exec.dag import StepRun
 from oracle.exec.executor import OpResult
 from oracle.log.store import open_store
 from oracle.registry.loader import Registry, load_registry
 from oracle.render import to_markdown
-from oracle.sdk.budget import Budget, parse_budget
 from oracle.sdk.summarize import MAP_BATCH, summarize
 from tests.conftest import _final, echo_distiller, plan, prompt_text
 
@@ -202,17 +202,6 @@ async def test_hop_steps_must_name_a_given_term(home_cfg: Config, fake_registry:
     assert answer.stopped.startswith("hop failed")  # type: ignore[union-attr]
 
 
-def test_budget_parsing_and_admission() -> None:
-    assert parse_budget(None, 100) == 100
-    assert parse_budget("unlimited", 100) is None
-    assert parse_budget("5000", 100) == 5000
-    with pytest.raises(ValueError):
-        parse_budget("-1", 100)
-    budget = Budget(tokens=10_000, reserve=2_000)
-    assert budget.admits(8_000) and not budget.admits(8_001)
-    assert Budget(tokens=None).admits(10**12)
-
-
 async def test_summary_batches_the_map_and_reduces_once(fake_registry: Registry) -> None:
     calls = {"map": 0, "reduce": 0}
 
@@ -232,12 +221,10 @@ async def test_summary_batches_the_map_and_reduces_once(fake_registry: Registry)
     n = MAP_BATCH * 5 + 3
     result.records = [{"key": f"P-{i}", "summary": "s"} for i in range(n)]
     result.pointers = [f"jira:P-{i}" for i in range(n)]
-    from oracle.plan.planner import Usage
-
     distilled, source = await summarize(
         question="q", interpretation="i", when="now", breadth=False, gaps=[],
         runs=[StepRun("s1", result)], registry=fake_registry,
-        mapper=FunctionModel(mapper), reducer=FunctionModel(reducer), usage=Usage(),
+        mapper=FunctionModel(mapper), reducer=FunctionModel(reducer), budget=Budget(),
     )  # fmt: skip
     assert calls == {"map": 6, "reduce": 1}
     assert distilled.findings[0].text == "merged" and source["jira:P-0"] == "acli.jira.search"
@@ -246,8 +233,6 @@ async def test_summary_batches_the_map_and_reduces_once(fake_registry: Registry)
 async def test_a_failed_map_batch_still_reaches_the_merge(fake_registry: Registry) -> None:
     """30 records of one step fit the distill shortcut by count, but distill shows only its
     first 25; they go through the map, and a batch whose map call fails passes its lines on."""
-    from oracle.plan.planner import Usage
-
     seen: list[str] = []
 
     def mapper(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -266,7 +251,7 @@ async def test_a_failed_map_batch_still_reaches_the_merge(fake_registry: Registr
     await summarize(
         question="q", interpretation="i", when="now", breadth=False, gaps=[],
         runs=[StepRun("s1", result)], registry=fake_registry,
-        mapper=FunctionModel(mapper), reducer=FunctionModel(reducer), usage=Usage(),
+        mapper=FunctionModel(mapper), reducer=FunctionModel(reducer), budget=Budget(),
     )  # fmt: skip
     merged = seen[0]
     assert "jira:P-19 " in merged and "jira:P-20 | acli.jira.search: a fact" in merged

@@ -11,11 +11,11 @@ groupings) becomes one `script.report` result with pointers of its own.
 from dataclasses import dataclass, field
 from typing import Any
 
+from oracle.budget import Budget
 from oracle.deep.runner import CallRefused
 from oracle.exec.dag import PlanRunner, StepRun
 from oracle.exec.executor import OpResult
 from oracle.plan.models import Step
-from oracle.sdk.budget import Budget
 
 REPORT_OP = "script.report"
 POINTER_KEY = "_pointer"
@@ -27,7 +27,7 @@ class ScriptCalls:
     tools: set[str]
     """The tools this call shortlisted; a script may call only their ops."""
     step_ids: set[str]
-    budget: Budget | None = None
+    budget: Budget
     attempt: int = 1
     runs: list[StepRun] = field(default_factory=list)
     calls: int = 0
@@ -46,7 +46,7 @@ class ScriptCalls:
         self.step_ids.add(step.id)
         run = await self.runner.run_literal(step)
         self.runs.append(run)
-        if self.budget is not None and run.ran and not run.same_as:
+        if run.ran and not run.same_as:
             self.budget.tool_calls += 1
         return self._records(run.result)
 

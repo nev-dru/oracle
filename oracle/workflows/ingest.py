@@ -17,10 +17,10 @@ from typing import Any
 import yaml
 from pydantic_ai.models import Model
 
+from oracle.budget import Usage
 from oracle.config import REPO_ROOT, Config
 from oracle.exec.executor import Executor, OpResult
 from oracle.exec.selftest import check
-from oracle.plan.planner import Usage
 from oracle.rank.eval import run_ranker_eval
 from oracle.registry.importers.cli_draft import (
     DraftContext,

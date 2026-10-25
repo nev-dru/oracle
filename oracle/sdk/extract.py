@@ -6,9 +6,10 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
 
+from oracle.budget import Budget
 from oracle.exec.dag import StepRun
 from oracle.plan.digest import DATA_RULE, defang, digest
-from oracle.plan.planner import Usage, prompt
+from oracle.plan.planner import prompt
 from oracle.registry.loader import Registry
 
 MAX_TERMS = 20
@@ -38,7 +39,7 @@ async def extract_terms(
     runs: list[StepRun],
     seen: set[str],
     registry: Registry,
-    usage: Usage,
+    budget: Budget,
 ) -> list[Term]:
     """New terms, best first; a term already searched (case-insensitively) is dropped."""
     lines = [f"Question: {question}"]
@@ -46,8 +47,7 @@ async def extract_terms(
         lines.append("Already searched (do not return): " + defang("; ".join(sorted(seen))[:2000]))
     # summary fields alone hide what a crawl follows: a search result's author is in the slice
     lines += ["", digest(runs, registry, per_step=12, slice_chars=SLICE_CHARS)]
-    result = await agent.run("\n".join(lines))
-    usage.add(result.usage)
+    result = await budget.model(agent.run("\n".join(lines)))
     fresh = [t for t in result.output.terms if key(t.value) not in seen and t.value.strip()]
     return sorted(fresh, key=lambda t: t.relevance, reverse=True)
 

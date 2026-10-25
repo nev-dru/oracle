@@ -11,6 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from oracle.ask import AskRequest, Models, ask
+from oracle.budget import parse_budget
 from oracle.config import Config
 from oracle.deep.runner import ScriptLimits, run_script
 from oracle.deep.sandbox import script_problems
@@ -22,7 +23,6 @@ from oracle.registry.codegen import build_library, sources
 from oracle.registry.loader import Registry
 from oracle.registry.schema import Tool
 from oracle.render import findings_from
-from oracle.sdk.budget import parse_budget
 from oracle.workflows.protocol import GuardError, Trace, WorkflowBudget
 from tests.conftest import DONE, echo_distiller, plan, scripted
 from tests.test_workflows import executor, wf_cfg, wf_registry  # noqa: F401 (fixtures)

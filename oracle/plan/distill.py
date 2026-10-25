@@ -14,9 +14,10 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.models import Model
 
+from oracle.budget import Budget
 from oracle.exec.dag import StepRun
 from oracle.plan.digest import DATA_RULE, digest
-from oracle.plan.planner import PLAN_RETRIES, Usage, prompt
+from oracle.plan.planner import PLAN_RETRIES, prompt
 from oracle.registry.loader import Registry
 
 MAX_FINDINGS = 15
@@ -93,7 +94,7 @@ async def run_distill(
     check_gaps: list[str],
     runs: list[StepRun],
     registry: Registry,
-    usage: Usage,
+    budget: Budget,
 ) -> Distilled:
     lines = [f"Question: {question}", f"Interpretation: {interpretation}", f"Now: {when}"]
     if breadth:
@@ -103,6 +104,5 @@ async def run_distill(
     lines += ["", digest(runs, registry, per_step=PER_STEP, slice_chars=300)]
     pointers = {p for run in runs if run.result.ok for p in run.result.pointers}
     deps = DistillContext(pointers, set(registry.tools))
-    result = await agent.run("\n".join(lines), deps=deps)
-    usage.add(result.usage)
+    result = await budget.model(agent.run("\n".join(lines), deps=deps))
     return result.output

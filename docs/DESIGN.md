@@ -52,6 +52,13 @@ No existing product does what the oracle does end to end: rank across heterogene
 
 What this comparison changes: the ingestion workflow's MCP import path moves up in priority (Atlassian, possibly Glean), and the A/B against native tool search is a named deliverable rather than an afterthought. What it does not change: the orchestrator is built, because the two properties the priorities depend on, isolated execution and coverage reporting, are not sold by anyone.
 
+## Terms
+
+The names the code and this document use for the parts of one call. Architecture reviews use these for the domain.
+
+- **Tier** (level): quick, standard or deep. A nested call runs at most at its parent's tier.
+- **Budget**: one per call, at every tier (`oracle/budget.py`). Every model call goes through it: it applies the per-call timeout, charges the call's usage, and reads a failure while the first Ctrl-C lands as `Interrupted`. It holds the tier's time bounds from one table (the per-call bound, the follow-up bound for checks or hops, the summarise-by bound at standard, the whole-summary bound at deep), the token budget and reserve at deep, and the crawl's tool-call count. A workflow's `WorkflowBudget` (model calls for nested asks) is separate.
+
 ## Architecture
 
 &#91;embedded content: oracle request flow · 5 steps, 1 replan loop\]
@@ -288,7 +295,7 @@ The crawl is the default deep strategy for discovery-shaped questions: search, r
 
 Stop when the hop depth is reached (default 3, `--depth`), when a hop yields no new terms, or when the budget is spent. Hop depth counts hops inside one invocation; it is not the recursion guard's call-tree depth.
 
-**Budget.** Tool calls cost no model tokens; extraction, planning and the summary do. Before each hop the crawl estimates its cost from the result sizes measured so far, keeps a reserve for the summary, and admits every new term if they fit. Only when they do not are terms admitted in relevance order until the budget is used, so there is no fixed top-k. `--budget <tokens>` sets it per call and `ORACLE_DEEP_BUDGET` sets the default. `--budget unlimited` leaves hop depth as the only limit and still keeps dedupe, per-tool concurrency (pacing, not a cap), a Ctrl-C that returns a summary of everything found so far, and a final cost line (tokens, searches, wall time). At home the crawl shares the Claude subscription with the main Claude Code session, so an unlimited crawl can spend the usage window the main session needs; at work it is Bedrock spend. As built: the summary reserve is 20K tokens, or a quarter of a smaller budget; the first plan's searches count toward the cost line and the 400-call cap. Tools start in their own process group (argv tools by the executor, MCP servers by the mcp client), so the first Ctrl-C reaches only the oracle and the hop's tool calls finish; model processes are Claude Code's own children and still get it, so a model call that fails after the first Ctrl-C ends the crawl as `interrupted` (not a failed hop), and a summary it kills runs once more.
+**Budget.** Tool calls cost no model tokens; extraction, planning and the summary do. Before each hop the crawl estimates its cost from the result sizes measured so far, keeps a reserve for the summary, and admits every new term if they fit. Only when they do not are terms admitted in relevance order until the budget is used, so there is no fixed top-k. `--budget <tokens>` sets it per call and `ORACLE_DEEP_BUDGET` sets the default. `--budget unlimited` leaves hop depth as the only limit and still keeps dedupe, per-tool concurrency (pacing, not a cap), a Ctrl-C that returns a summary of everything found so far, and a final cost line (tokens, searches, wall time). At home the crawl shares the Claude subscription with the main Claude Code session, so an unlimited crawl can spend the usage window the main session needs; at work it is Bedrock spend. As built: the summary reserve is 20K tokens, or a quarter of a smaller budget; the first plan's searches count toward the cost line and the 400-call cap. Tools start in their own process group (argv tools by the executor, MCP servers by the mcp client), so the first Ctrl-C reaches only the oracle and the hop's tool calls finish; model processes are Claude Code's own children and still get it, so a model call that fails while the first Ctrl-C lands ends the crawl as `interrupted` (not a failed hop), and a summary it kills runs once more; the Budget makes that call, since every model call goes through it.
 
 **Summary.** Map then reduce: Haiku summarises each result in parallel, one Sonnet call merges them into the output contract. The contract does not change (3–15 findings with pointers); Coverage adds hops run, searches run, terms found but not expanded (with why: budget or depth) and the cost.
 
@@ -413,7 +420,8 @@ oracle/
     pointers.py     # pointer format, spill files, expand
   timewin.py        # "today", "this week", "past 3 days" -> absolute window in the user's zone
   evals.py          # oracle eval: golden clauses against what ran, plus the judge
-  sdk/              # budget.py, extract.py, hop.py, crawl.py, summarize.py: the deep crawl
+  budget.py         # one budget per call: per-call timeout, usage, the tier's bounds, Ctrl-C
+  sdk/              # extract.py, hop.py, crawl.py, summarize.py: the deep crawl
   deep/
     sandbox.py      # the allowlist AST check a script passes before it runs
     child.py        # the script's process: stdlib only, restricted builtins, RPC on fd 1

@@ -8,6 +8,7 @@ import pydantic_ai
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.models import Model
 
+from oracle.budget import Budget
 from oracle.plan.models import Plan, plan_errors
 from oracle.rank.index import RankedTool
 from oracle.registry.loader import Registry
@@ -33,34 +34,10 @@ class Shortlist:
 
 
 @dataclass
-class Usage:
-    tokens_in: int = 0
-    tokens_out: int = 0
-    model_calls: int = 0
-
-    def add(self, run_usage: object) -> None:
-        """Add a PydanticAI RunUsage."""
-        self.tokens_in += getattr(run_usage, "input_tokens", 0) or 0
-        self.tokens_out += getattr(run_usage, "output_tokens", 0) or 0
-        self.model_calls += getattr(run_usage, "requests", 0) or 0
-
-    def merge(self, other: "Usage") -> None:
-        self.tokens_in += other.tokens_in
-        self.tokens_out += other.tokens_out
-        self.model_calls += other.model_calls
-
-
-@dataclass
 class PlanContext:
     registry: Registry
     allowed: set[str]
     max_steps: int
-
-
-@dataclass
-class PlanOutcome:
-    plan: Plan
-    usage: Usage
 
 
 def prompt(name: str) -> str:
@@ -96,9 +73,10 @@ async def make_plan(
     max_steps: int,
     now: datetime,
     window: TimeWindow | None = None,
+    budget: Budget,
     breadth: bool = False,
     guidance: str = "",
-) -> PlanOutcome:
+) -> Plan:
     text = render_request(question, intent, shortlist, registry, max_steps, now, window)
     if guidance:
         text += "\n\n" + guidance
@@ -106,11 +84,9 @@ async def make_plan(
         text += (
             "\n\nBreadth requested: one step per listed tool that could hold part of the answer."
         )
-    result = await agent.run(text, deps=PlanContext(registry, shortlist.allowed, max_steps))
-    usage = Usage()
-    usage.add(result.usage)
-    plan = result.output.model_copy(update={"breadth": True}) if breadth else result.output
-    return PlanOutcome(plan=plan, usage=usage)
+    deps = PlanContext(registry, shortlist.allowed, max_steps)
+    result = await budget.model(agent.run(text, deps=deps))
+    return result.output.model_copy(update={"breadth": True}) if breadth else result.output
 
 
 def render_request(

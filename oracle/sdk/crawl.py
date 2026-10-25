@@ -7,20 +7,19 @@ depth, when no new terms appear, or when the budget, time or tool-call cap runs 
 term found but not searched is reported with why.
 """
 
-import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pydantic_ai import Agent
 
+from oracle.budget import Budget
 from oracle.exec.bindings import is_binding
 from oracle.exec.dag import PlanRunner, StepRun
 from oracle.plan.models import Step
-from oracle.plan.planner import Shortlist, Usage
+from oracle.plan.planner import Shortlist
 from oracle.registry.loader import Registry
 from oracle.registry.schema import Recipe
 from oracle.render import Finding, findings_from
-from oracle.sdk.budget import Budget
 from oracle.sdk.extract import Term, Terms, extract_terms, key
 from oracle.sdk.hop import STEPS_PER_TERM, HopContext, HopPlan, plan_hop
 
@@ -48,11 +47,7 @@ class Crawler:
     budget: Budget
     shortlist_for: Callable[[str], Shortlist]
     step_ids: set[str]
-    usage: Usage
     depth: int = 3
-    stop: asyncio.Event | None = None
-    model_s: float = 90.0
-    """Any one model call (extract or hop plan), whatever the provider."""
     seen: set[str] = field(default_factory=set)
     outcome: CrawlOutcome = field(default_factory=lambda: CrawlOutcome(runs=[]))
 
@@ -77,7 +72,7 @@ class Crawler:
             return "depth"
         if not new:
             return "no new results"
-        if self.stop is not None and self.stop.is_set():
+        if self.budget.stopping():
             return "interrupted"
         if self.budget.out_of_time():
             return "time"
@@ -86,14 +81,14 @@ class Crawler:
         return None
 
     async def _hop(self, out: CrawlOutcome, new: list[StepRun]) -> list[StepRun] | None:
-        terms = await self._model(extract_terms(
+        terms = await extract_terms(
             self.extractor,
             question=self.question,
             runs=new,
             seen=self.seen,
             registry=self.registry,
-            usage=self.usage,
-        ))  # fmt: skip
+            budget=self.budget,
+        )
         self.seen |= {key(t.value) for t in terms}
         admitted, rest = self._admit(terms)
         out.unexpanded += [f"{t.value} (budget)" for t in rest]
@@ -102,7 +97,7 @@ class Crawler:
             return None
         hop = out.hops + 1
         query = " ".join([self.question, *(t.description for t in admitted)])
-        plan = await self._model(plan_hop(
+        plan = await plan_hop(
             self.hop_planner,
             hop=hop,
             question=self.question,
@@ -110,8 +105,8 @@ class Crawler:
             shortlist=self.shortlist_for(query),
             registry=self.registry,
             earlier=self.step_ids,
-            usage=self.usage,
-        ))  # fmt: skip
+            budget=self.budget,
+        )
         searched = _searched(out, admitted, plan)
         if not plan.steps:
             out.stopped = "no searchable terms"
@@ -120,10 +115,6 @@ class Crawler:
         out.hops = hop  # only once the hop's runs are in hand, so the count never runs ahead
         out.searched += [t.value for t in searched]
         return runs
-
-    async def _model[T](self, work: Awaitable[T]) -> T:
-        async with asyncio.timeout(self.model_s):
-            return await work
 
     def _admit(self, terms: list[Term]) -> tuple[list[Term], list[Term]]:
         """Every term the budget can afford, best first; with an unlimited budget, all of them."""

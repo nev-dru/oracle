@@ -2,21 +2,20 @@
 run-time failure send it back once with the traceback (its calls are reused, not re-run). The
 summary reads what the script reported; Coverage and the log see every call it made."""
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pydantic_ai.models import Model
 
+from oracle.budget import Budget
 from oracle.deep.bridge import ScriptCalls, report_runs
 from oracle.deep.runner import ScriptResult, run_script
 from oracle.deep.script_agent import Script, build_script_agent, write_script
 from oracle.exec.dag import PlanRunner, StepRun
-from oracle.plan.planner import Shortlist, Usage
+from oracle.plan.planner import Shortlist
 from oracle.registry.codegen import build_library
 from oracle.registry.loader import Registry
-from oracle.sdk.budget import Budget
 
 ATTEMPTS = 2
 PRINTED_TAIL = 2000  # chars of the script's print output sent back with a traceback
@@ -48,11 +47,8 @@ class ScriptPath:
     home: Path
     runner: PlanRunner
     step_ids: set[str]
-    budget: Budget | None
-    usage: Usage
+    budget: Budget
     call_id: str
-    bound: Callable[[Awaitable[Script]], Awaitable[Script]]
-    """Wraps each model call in the caller's per-call timeout."""
     run: ScriptRun | None = None
     failures: list[str] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
@@ -68,21 +64,21 @@ class ScriptPath:
             if attempt > 1 and self._spent(cost):
                 self.gaps.append("no second attempt: the budget or the time is spent")
                 break
-            before = self.usage.tokens_in + self.usage.tokens_out
+            before = self.budget.spent
             try:
-                script = await self.bound(write_script(
+                script = await write_script(
                     agent,
                     question=self.question,
                     when=self.when,
                     shortlist=self.shortlist,
                     library=library,
-                    usage=self.usage,
+                    budget=self.budget,
                     failed=failed,
-                ))  # fmt: skip
+                )
             except Exception as exc:  # reported like a planner failure, never a traceback
                 self.failures.append(f"script writer: {type(exc).__name__}: {exc}")
                 break
-            cost = self.usage.tokens_in + self.usage.tokens_out - before
+            cost = self.budget.spent - before
             calls.attempt, calls.calls = attempt, 0
             result = await _run_safely(script.code, calls, library.path)
             earlier = self.run.result.reports if self.run else []
@@ -95,9 +91,7 @@ class ScriptPath:
     def _spent(self, cost: int) -> bool:
         """A correction would cost about what the first script did; `--budget` and the deep
         wall clock bound the script path as they bound a crawl."""
-        return self.budget is not None and (
-            not self.budget.admits(cost) or self.budget.out_of_time()
-        )
+        return not self.budget.admits(cost) or self.budget.out_of_time()
 
     def _runs(self, calls: ScriptCalls) -> list[StepRun]:
         run = self.run

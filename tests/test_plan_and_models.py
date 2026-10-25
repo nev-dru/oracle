@@ -7,6 +7,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from oracle.budget import Budget
 from oracle.llm import claude_code
 from oracle.llm.models import resolve_model
 from oracle.plan.models import Plan, Step, plan_errors
@@ -56,7 +57,8 @@ async def test_planner_retries_with_validation_feedback(fake_registry: Registry)
         plan("acli.jira.search", jql='text ~ "transfer"'),
     )
     shortlist = Shortlist(Ranker(fake_registry).rank("tickets about transfer"))
-    outcome = await make_plan(
+    budget = Budget()
+    made = await make_plan(
         build_planner(model),
         question="tickets about transfer",
         intent=None,
@@ -64,9 +66,10 @@ async def test_planner_retries_with_validation_feedback(fake_registry: Registry)
         registry=fake_registry,
         max_steps=1,
         now=datetime.now().astimezone(),
+        budget=budget,
     )
-    assert outcome.plan.steps[0].params == {"jql": 'text ~ "transfer"'}
-    assert outcome.usage.model_calls == 2
+    assert made.steps[0].params == {"jql": 'text ~ "transfer"'}
+    assert budget.usage.model_calls == 2
     retry_prompt = claude_code.transcript(seen[1])
     assert "rejected" in retry_prompt and "unknown params ['query']" in retry_prompt
 

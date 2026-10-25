@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.models import Model
 
+from oracle.budget import Budget
 from oracle.exec.dag import StepRun
 from oracle.plan.digest import (
     DATA_CLOSE,
@@ -28,7 +29,7 @@ from oracle.plan.distill import (
     build_distiller,
     run_distill,
 )
-from oracle.plan.planner import PLAN_RETRIES, Usage, prompt
+from oracle.plan.planner import PLAN_RETRIES, prompt
 from oracle.registry.loader import Registry
 
 MAP_BATCH = 20
@@ -95,7 +96,7 @@ async def summarize(
     registry: Registry,
     mapper: Model | str,
     reducer: Model | str,
-    usage: Usage,
+    budget: Budget,
 ) -> tuple[Distilled, dict[str, str]]:
     """(distilled answer, pointer -> op that produced it)."""
     found = [r for r in runs if r.found]
@@ -111,16 +112,16 @@ async def summarize(
             check_gaps=gaps,
             runs=found,
             registry=registry,
-            usage=usage,
+            budget=budget,
         )
         return distilled, source
-    notes = await _map(question, lines_of(found, registry), mapper, usage)
+    notes = await _map(question, lines_of(found, registry), mapper, budget)
     return await _reduce(
-        question, interpretation, when, breadth, gaps, notes, source, registry, reducer, usage
+        question, interpretation, when, breadth, gaps, notes, source, registry, reducer, budget
     ), source
 
 
-async def _map(question: str, lines: list[Line], model: Model | str, usage: Usage) -> list[Item]:
+async def _map(question: str, lines: list[Line], model: Model | str, budget: Budget) -> list[Item]:
     agent = build_mapper(model)
 
     slots = asyncio.Semaphore(MAP_CONCURRENCY)  # whatever the provider; Claude Code caps again
@@ -129,8 +130,8 @@ async def _map(question: str, lines: list[Line], model: Model | str, usage: Usag
         data = "\n".join(f"  {defang(b.pointer)} | {defang(b.text)}" for b in batch)
         text = f"Question: {question}\n\n{DATA_OPEN}\n{data}\n{DATA_CLOSE}"
         async with slots:
-            result = await agent.run(text, deps=MapContext({b.pointer for b in batch}))
-        usage.add(result.usage)
+            deps = MapContext({b.pointer for b in batch})
+            result = await budget.model(agent.run(text, deps=deps))
         return result.output.items
 
     batches = [lines[i : i + MAP_BATCH] for i in range(0, len(lines), MAP_BATCH)]
@@ -158,7 +159,7 @@ async def _reduce(
     source: dict[str, str],
     registry: Registry,
     model: Model | str,
-    usage: Usage,
+    budget: Budget,
 ) -> Distilled:
     agent = build_distiller(model)
     header = [f"Question: {question}", f"Interpretation: {interpretation}", f"Now: {when}"]
@@ -173,6 +174,5 @@ async def _reduce(
         [*header, "", "Notes from every batch of results:", DATA_OPEN, data, DATA_CLOSE]
     )
     deps = DistillContext({n.pointer for n in notes}, set(registry.tools))
-    result = await agent.run(text, deps=deps)
-    usage.add(result.usage)
+    result = await budget.model(agent.run(text, deps=deps))
     return result.output

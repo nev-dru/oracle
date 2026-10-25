@@ -71,7 +71,7 @@ def ask_cmd(
 
     if level is not None and level not in LEVELS:
         _die(f"--level must be one of {', '.join(LEVELS)}")
-    from oracle.sdk.budget import parse_budget
+    from oracle.budget import parse_budget
 
     try:
         parse_budget(budget, 1)

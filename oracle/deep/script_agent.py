@@ -10,8 +10,9 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.models import Model
 
+from oracle.budget import Budget
 from oracle.deep.sandbox import script_problems
-from oracle.plan.planner import PLAN_RETRIES, Shortlist, Usage, prompt
+from oracle.plan.planner import PLAN_RETRIES, Shortlist, prompt
 from oracle.registry.codegen import Library, ident
 
 SDK_NAMES = {"gather", "report"}
@@ -65,7 +66,7 @@ async def write_script(
     when: str,
     shortlist: Shortlist,
     library: Library,
-    usage: Usage,
+    budget: Budget,
     failed: tuple[str, str] | None = None,
 ) -> Script:
     tools = [t.tool for t in shortlist.tools]
@@ -76,6 +77,5 @@ async def write_script(
         code, error = failed
         lines += ["", "Your previous script failed. Fix it.", "```python", code, "```", error]
     deps = ScriptContext({ident(t) for t in tools})
-    result = await agent.run("\n".join(lines), deps=deps)
-    usage.add(result.usage)
+    result = await budget.model(agent.run("\n".join(lines), deps=deps))
     return result.output
