@@ -1,34 +1,38 @@
 """The per-call budget: each tier's bounds, the token reserve, the per-call timeout, the usage
-charge, and how a Ctrl-C during a model call is read. A fake clock, no models."""
+charge, and how a Ctrl-C during a model call is read. A fake clock, and agents over function
+models."""
 
 import asyncio
-from dataclasses import dataclass
-from types import SimpleNamespace
-from typing import Any
+from collections.abc import Awaitable, Callable
 
 import pytest
+from pydantic_ai import Agent
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.usage import RequestUsage
 
 from oracle.budget import BOUNDS, SUMMARY_RESERVE, Bounds, Budget, Interrupted, parse_budget
 
-
-@dataclass
-class Ran:
-    """What `agent.run` returns, as far as the budget reads it."""
-
-    usage: Any
+Respond = Callable[[list[ModelMessage], AgentInfo], Awaitable[ModelResponse]]
 
 
-def ran(tokens_in: int = 10, tokens_out: int = 5) -> Ran:
-    return Ran(SimpleNamespace(input_tokens=tokens_in, output_tokens=tokens_out, requests=1))
+def reply(text: str = "ok", tokens_in: int = 10, tokens_out: int = 5) -> ModelResponse:
+    return ModelResponse(
+        parts=[TextPart(text)], usage=RequestUsage(input_tokens=tokens_in, output_tokens=tokens_out)
+    )
 
 
-async def done(value: Ran) -> Ran:
-    return value
+def agent(respond: Respond) -> Agent[None, str]:
+    return Agent(FunctionModel(respond))
 
 
-async def slow() -> Ran:
+async def done(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    return reply("ok", 30, 20)
+
+
+async def slow(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     await asyncio.sleep(1)
-    return ran()
+    return reply()
 
 
 class Clock:
@@ -94,28 +98,41 @@ def test_time_bounds_read_one_clock(level: str, at: float, out_of_time: bool, la
 
 async def test_a_model_call_is_charged() -> None:
     budget = Budget(tokens=1_000)
-    await budget.model(done(ran(30, 20)))
-    await budget.model(done(ran(30, 20)))
+    result = await budget.model(agent(done), "q")
+    await budget.model(agent(done), "q")
+    assert result.output == "ok"
     assert budget.spent == 100 and budget.usage.model_calls == 2 and budget.available() == 900
+
+
+async def test_a_call_that_runs_out_of_retries_is_charged_too() -> None:
+    """Each retry is a request that spent tokens; the call failing does not refund them."""
+
+    async def invalid(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return reply("not a number", 100, 7)
+
+    budget = Budget()
+    with pytest.raises(Exception, match="retries"):
+        await budget.model(Agent(FunctionModel(invalid), output_type=int, retries=2), "q")
+    assert budget.usage.model_calls == 3 and budget.spent == 321
 
 
 async def test_a_model_call_is_bounded() -> None:
     budget = Budget(bounds=Bounds(model_s=0.01))
     with pytest.raises(TimeoutError):
-        await budget.model(slow())
-    assert budget.usage.model_calls == 0
+        await budget.model(agent(slow), "q")
+    assert budget.usage.model_calls == 0  # the request never returned, so nothing to charge
 
 
 async def test_a_failure_while_the_stop_is_set_is_interrupted() -> None:
     stop = asyncio.Event()
     budget = Budget(stop=stop)
 
-    async def killed() -> Ran:
+    async def killed(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         stop.set()  # the Ctrl-C lands while the call runs, and kills its process
         raise RuntimeError("claude exited with -2")
 
     with pytest.raises(Interrupted, match="claude exited with -2"):
-        await budget.model(killed())
+        await budget.model(agent(killed), "q")
     assert budget.stopping()
 
 
@@ -124,35 +141,35 @@ async def test_a_call_started_after_the_stop_fails_for_its_own_reasons() -> None
     stop.set()
     budget = Budget(stop=stop)
 
-    async def broken() -> Ran:
+    async def broken(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         raise RuntimeError("bad output")
 
     with pytest.raises(RuntimeError, match="bad output"):
-        await budget.model(broken())
+        await budget.model(agent(broken), "q")
 
 
 async def test_cancellation_passes_through() -> None:
     stop = asyncio.Event()
     budget = Budget(stop=stop)
 
-    async def cancelled() -> Ran:
+    async def cancelled(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         stop.set()
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        await budget.model(cancelled())
+        await budget.model(agent(cancelled), "q")
 
 
 async def test_the_deep_summary_has_one_bound_for_all_its_calls() -> None:
     budget = Budget.for_tier("deep", 10_000)
     async with budget.summary() as spend:
         assert spend.bounds.model_s is None  # no single call has less than the whole summary
-        await spend.model(done(ran()))
+        await spend.model(agent(done), "q")
     assert budget.usage.model_calls == 1  # the view charges the call's own budget
     short = Budget(bounds=Bounds(summary_s=0.01))
     with pytest.raises(TimeoutError):
         async with short.summary() as spend:
-            await spend.model(slow())
+            await spend.model(agent(slow), "q")
 
 
 async def test_the_standard_summary_keeps_the_per_call_bound() -> None:

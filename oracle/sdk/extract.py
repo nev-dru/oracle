@@ -47,7 +47,7 @@ async def extract_terms(
         lines.append("Already searched (do not return): " + defang("; ".join(sorted(seen))[:2000]))
     # summary fields alone hide what a crawl follows: a search result's author is in the slice
     lines += ["", digest(runs, registry, per_step=12, slice_chars=SLICE_CHARS)]
-    result = await budget.model(agent.run("\n".join(lines)))
+    result = await budget.model(agent, "\n".join(lines))
     fresh = [t for t in result.output.terms if key(t.value) not in seen and t.value.strip()]
     return sorted(fresh, key=lambda t: t.relevance, reverse=True)
 

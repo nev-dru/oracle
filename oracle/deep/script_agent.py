@@ -77,5 +77,5 @@ async def write_script(
         code, error = failed
         lines += ["", "Your previous script failed. Fix it.", "```python", code, "```", error]
     deps = ScriptContext({ident(t) for t in tools})
-    result = await budget.model(agent.run("\n".join(lines), deps=deps))
+    result = await budget.model(agent, "\n".join(lines), deps=deps)
     return result.output

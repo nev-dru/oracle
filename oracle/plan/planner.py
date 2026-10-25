@@ -85,7 +85,7 @@ async def make_plan(
             "\n\nBreadth requested: one step per listed tool that could hold part of the answer."
         )
     deps = PlanContext(registry, shortlist.allowed, max_steps)
-    result = await budget.model(agent.run(text, deps=deps))
+    result = await budget.model(agent, text, deps=deps)
     return result.output.model_copy(update={"breadth": True}) if breadth else result.output
 
 

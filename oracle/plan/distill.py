@@ -104,5 +104,5 @@ async def run_distill(
     lines += ["", digest(runs, registry, per_step=PER_STEP, slice_chars=300)]
     pointers = {p for run in runs if run.result.ok for p in run.result.pointers}
     deps = DistillContext(pointers, set(registry.tools))
-    result = await budget.model(agent.run("\n".join(lines), deps=deps))
+    result = await budget.model(agent, "\n".join(lines), deps=deps)
     return result.output

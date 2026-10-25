@@ -10,10 +10,13 @@ so a work API is never flooded.
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import Any
+
+from pydantic_ai import Agent, AgentRunResult
+from pydantic_ai.usage import RunUsage
 
 UNLIMITED = None
 SUMMARY_RESERVE = 20_000
@@ -58,11 +61,6 @@ class Interrupted(Exception):
     model processes too (Claude Code's children share the terminal's process group)."""
 
 
-class _Run(Protocol):
-    @property
-    def usage(self) -> Any: ...
-
-
 @dataclass
 class Budget:
     tokens: int | None = None
@@ -99,20 +97,22 @@ class Budget:
         reserve = min(SUMMARY_RESERVE, tokens // 4)
         return cls(tokens=tokens, reserve=reserve, bounds=bounds, stop=stop)
 
-    async def model[R: _Run](self, work: Awaitable[R]) -> R:
-        """Run one model call within its bound and charge what it used. A failure while the
-        stop was being set raises Interrupted; a call started after the stop is not killed by
-        it, so it fails only for its own reasons."""
+    async def model[O](self, agent: Agent[Any, O], prompt: str, **run: Any) -> AgentRunResult[O]:
+        """Run one model call (`agent.run(prompt, **run)`) within its bound, and charge what it
+        used, failed or not: a call that runs out of retries or time still spent its requests'
+        tokens. A failure while the stop was being set raises Interrupted; a call started after
+        the stop is not killed by it, so it fails only for its own reasons."""
         stopped = self.stopping()
+        usage = RunUsage()  # PydanticAI adds each request's usage to it as the request returns
         try:
             async with asyncio.timeout(self.bounds.model_s):
-                result = await work
+                return await agent.run(prompt, usage=usage, **run)
         except Exception as exc:  # never CancelledError: cancellation passes through untouched
             if not stopped and self.stopping():
                 raise Interrupted(f"stopped by Ctrl-C ({type(exc).__name__}: {exc})") from exc
             raise
-        self.usage.add(result.usage)
-        return result
+        finally:
+            self.usage.add(usage)
 
     @asynccontextmanager
     async def summary(self) -> AsyncIterator["Budget"]:

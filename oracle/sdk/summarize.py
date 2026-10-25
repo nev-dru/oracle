@@ -131,7 +131,7 @@ async def _map(question: str, lines: list[Line], model: Model | str, budget: Bud
         text = f"Question: {question}\n\n{DATA_OPEN}\n{data}\n{DATA_CLOSE}"
         async with slots:
             deps = MapContext({b.pointer for b in batch})
-            result = await budget.model(agent.run(text, deps=deps))
+            result = await budget.model(agent, text, deps=deps)
         return result.output.items
 
     batches = [lines[i : i + MAP_BATCH] for i in range(0, len(lines), MAP_BATCH)]
@@ -183,5 +183,5 @@ async def _reduce(
         [*header, "", "Notes from every batch of results:", DATA_OPEN, data, DATA_CLOSE]
     )
     deps = DistillContext({n.pointer for n in notes}, set(registry.tools))
-    result = await budget.model(agent.run(text, deps=deps))
+    result = await budget.model(agent, text, deps=deps)
     return result.output

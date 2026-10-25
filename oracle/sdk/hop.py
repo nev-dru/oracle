@@ -92,5 +92,5 @@ async def plan_hop(
         earlier,
         STEPS_PER_TERM * len(terms),
     )
-    result = await budget.model(agent.run("\n".join(lines), deps=deps))
+    result = await budget.model(agent, "\n".join(lines), deps=deps)
     return result.output

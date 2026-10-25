@@ -93,5 +93,5 @@ async def run_check(
     if guidance:
         lines += ["", guidance]
     deps = CheckContext(registry, shortlist.allowed, max_steps, earlier | {r.step_id for r in runs})
-    result = await budget.model(agent.run("\n".join(lines), deps=deps))
+    result = await budget.model(agent, "\n".join(lines), deps=deps)
     return result.output
