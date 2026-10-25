@@ -10,7 +10,6 @@ from typing import Annotated, Any, NoReturn
 import typer
 
 from oracle.config import REPO_ROOT, Config, ConfigError, load_config
-from oracle.exec.executor import Executor
 from oracle.exec.pointers import SpillError, expand_spill
 from oracle.exec.selftest import ExampleResult, golden_ops_missing, run_examples
 from oracle.log.store import open_store
@@ -77,36 +76,34 @@ def ask_cmd(
         parse_budget(budget, 1)
     except ValueError:
         _die("--budget must be a positive number of tokens or 'unlimited'")
-    trace, level, note = _nested(question, level)
+    entry = _entry(question, level, script)
     cfg, registry = _setup()
     req = AskRequest(
-        question, intent, level, _csv(scope), _csv(prefer), session, breadth, depth, budget, script
-    )
-    if note:
-        typer.echo(f"oracle: {note}", err=True)
+        question, intent, entry.level, _csv(scope), _csv(prefer), session, breadth, depth,
+        budget, entry.script,
+    )  # fmt: skip
+    if entry.clamped:
+        typer.echo(f"oracle: {entry.clamped}", err=True)
     try:
-        answer = asyncio.run(_ask_interruptibly(req, cfg, registry, trace))
+        answer = asyncio.run(_ask_interruptibly(req, cfg, registry, entry))
     except ConfigError as exc:
         _die(str(exc))
     typer.echo(to_json(answer) if fmt == "json" else to_markdown(answer))
 
 
-def _nested(question: str, level: str | None) -> tuple[Any, str, str | None]:
-    """(trace, level, note): inside ORACLE_TRACE this call is nested, so it enters the guard
-    (refused on a cycle or too deep) and runs no higher than its parent, one lower by default."""
-    from oracle.workflows.protocol import GuardError, Trace, clamp
+def _entry(question: str, level: str | None, script: bool) -> Any:
+    """Inside ORACLE_TRACE this call is nested, so it enters the guard (refused on a cycle or
+    too deep) and runs no higher than its parent, one lower by default."""
+    from oracle.workflows.protocol import GuardError, Trace, enter_ask
 
     parent = Trace.from_env(os.environ.get("ORACLE_TRACE"))
-    if parent is None:
-        return None, level or "standard", None
-    tier, note = clamp(parent.level, level)
     try:
-        return parent.enter("oracle", "ask", question, level=tier), tier, note
+        return enter_ask(parent, question, level, script)
     except GuardError as exc:
         _die(f"refused: {exc}")
 
 
-async def _ask_interruptibly(req: Any, cfg: Config, registry: Registry, trace: Any = None) -> Any:
+async def _ask_interruptibly(req: Any, cfg: Config, registry: Registry, entry: Any) -> Any:
     """The first Ctrl-C ends a deep crawl at the next hop and still prints what it found; a
     second one interrupts for real."""
     import signal
@@ -114,7 +111,7 @@ async def _ask_interruptibly(req: Any, cfg: Config, registry: Registry, trace: A
     from oracle.ask import ask
 
     if req.level != "deep" or req.script:  # only a crawl has hops to stop between
-        return await ask(req, cfg, registry, trace=trace)
+        return await ask(req, cfg, registry, entry=entry)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -125,7 +122,7 @@ async def _ask_interruptibly(req: Any, cfg: Config, registry: Registry, trace: A
 
     loop.add_signal_handler(signal.SIGINT, first_interrupt)
     try:
-        return await ask(req, cfg, registry, stop=stop, trace=trace)
+        return await ask(req, cfg, registry, stop=stop, entry=entry)
     finally:
         loop.remove_signal_handler(signal.SIGINT)
 
@@ -205,12 +202,11 @@ async def _run_one(
     import uuid
 
     from oracle.log.store import CallRecord
-    from oracle.workflows.runner import WorkflowHost
+    from oracle.workflows.runner import call_scope
 
-    host = WorkflowHost(cfg, registry, trace)
-    executor = Executor(registry, cfg.tool_env(), cfg.spill_dir, host)
     start = time.monotonic()
-    result = await executor.run(ref, values)
+    with call_scope(cfg, registry, trace) as executor:
+        result = await executor.run(ref, values)
     call_id = uuid.uuid4().hex[:12]
     session = session or f"adhoc-{call_id}"
     record = CallRecord(
@@ -287,11 +283,10 @@ def tool_test(
         problems = "".join(f"\n  problem: {p}" for p in registry.problems)
         _die(f"unknown tools {unknown}; active: {sorted(registry.tools)}{problems}")
     from oracle.workflows.protocol import Trace
-    from oracle.workflows.runner import WorkflowHost
+    from oracle.workflows.runner import call_scope
 
-    host = WorkflowHost(cfg, registry, Trace.root("deep"))  # workflow examples run too
-    executor = Executor(registry, cfg.tool_env(), cfg.spill_dir, host)
-    results = asyncio.run(run_examples(registry, executor, set(names) if names else None))
+    with call_scope(cfg, registry, Trace.root("deep")) as executor:  # workflow examples run too
+        results = asyncio.run(run_examples(registry, executor, set(names) if names else None))
     raise typer.Exit(1 if _report(results, registry) else 0)
 
 

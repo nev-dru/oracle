@@ -19,7 +19,7 @@ from oracle.budget import Budget, Interrupted, parse_budget
 from oracle.config import REPO_ROOT, Config, ConfigError
 from oracle.deep.scripted import ScriptPath, ScriptRun
 from oracle.exec.dag import PlanRunner, StepRun
-from oracle.exec.executor import TOOL_SLOTS, Executor
+from oracle.exec.executor import Executor
 from oracle.llm.models import resolve_model
 from oracle.log.store import CallRecord, open_store
 from oracle.plan.check import Check, build_checker, run_check
@@ -36,8 +36,8 @@ from oracle.sdk.hop import build_hop_planner
 from oracle.sdk.summarize import summarize
 from oracle.skills.loader import load_skills, render, select
 from oracle.timewin import TimeWindow, default_builtins, resolve_window
-from oracle.workflows.protocol import CURRENT_TRACE, Trace
-from oracle.workflows.runner import WorkflowHost
+from oracle.workflows.protocol import AskEntry, Trace, enter_ask
+from oracle.workflows.runner import call_scope
 
 SKILLS = load_skills(REPO_ROOT / "skills")
 MAX_STEPS = {"quick": 1, "standard": 12, "deep": 12}
@@ -108,9 +108,13 @@ class _Call:
     cfg: Config
     registry: Registry
     models: Models
+    budget: Budget
+    """The tier's budget; every model call goes through it."""
+    trace: Trace
+    """This call's link in the guard's chain."""
+    asked: str
+    """The level the caller asked for, before --script raised it."""
     call_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    budget: Budget = field(default_factory=Budget)
-    """The tier's budget, set once the level is settled; every model call goes through it."""
     notes: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
@@ -123,9 +127,6 @@ class _Call:
     runner: PlanRunner | None = None
     crawl: CrawlOutcome | None = None
     script: ScriptRun | None = None
-    trace: Trace | None = None
-    asked: str = "standard"
-    """The level the caller asked for, before any adjustment."""
 
     @property
     def session(self) -> str:
@@ -167,35 +168,26 @@ async def ask(
     registry: Registry,
     models: Models | Model | str | None = None,
     stop: asyncio.Event | None = None,
-    trace: Trace | None = None,
+    entry: AskEntry | None = None,
 ) -> Answer:
     """`stop` (set by Ctrl-C in the CLI) ends a deep crawl at the next hop with what it has.
-    `trace` is the guard's chain when this call is nested in a workflow or another oracle."""
+    `entry` is how a nested call entered the guard (`enter_ask`), and its level and --script
+    win over the request's; without one this is a root call, the chain's first link, so a tool
+    that asks the same question again is a cycle."""
     if req.level not in LEVELS:
         raise ValueError(f"level must be one of {LEVELS}, got {req.level!r}")
     if not isinstance(models, Models):
         models = Models(planner=models)  # a bare model is the planner
-    call = _Call(req, cfg, registry, models, asked=req.level)
-    req = _reconcile(call, trace)
-    call.budget = _budget(call, stop)
-    # the root call is the chain's first link, so a tool that asks the same question again is
-    # a cycle; a nested call arrives with its link already entered
-    call.trace = (
-        replace(trace, level=req.level)  # --script may have raised it, within the ceiling
-        if trace
-        else Trace.root(req.level).enter("oracle", "ask", req.question)
-    )
-    token = CURRENT_TRACE.set(call.trace)  # nested calls below this one see this call's trace
-    shared = TOOL_SLOTS.get()
-    slots = TOOL_SLOTS.set({} if shared is None else shared)  # nested calls share tool limits
-    try:
-        return await _run(call)
-    finally:
-        TOOL_SLOTS.reset(slots)
-        CURRENT_TRACE.reset(token)
+    entry = entry or enter_ask(None, req.question, req.level, req.script)
+    req, notes = _reconcile(replace(req, level=entry.level, script=entry.script))
+    budget = _budget(req, cfg, stop)
+    call = _Call(req, cfg, registry, models, budget, entry.trace, entry.asked)
+    call.notes += [*entry.notes, *notes]
+    with call_scope(cfg, registry, entry.trace, models) as executor:
+        return await _run(call, executor)
 
 
-async def _run(call: _Call) -> Answer:
+async def _run(call: _Call, executor: Executor) -> Answer:
     req, cfg, registry = call.req, call.cfg, call.registry
     now = now_in(cfg.timezone)
     call.window = resolve_window(req.question, now)
@@ -205,7 +197,7 @@ async def _run(call: _Call) -> Answer:
         call.gaps.append("no active tool matches the question or --scope")
         return await _finish(call, [])
     call.resolve_models()
-    runner = call.runner = _runner(call, now)
+    runner = call.runner = _runner(call, executor, now)
     if req.script:
         return await _finish(call, await _script(call, runner), runner)
     return await _planned(call, ranker, runner, now)
@@ -243,13 +235,13 @@ async def _planned(call: _Call, ranker: Ranker, runner: PlanRunner, now: datetim
     return await _finish(call, runs, runner)
 
 
-def _budget(call: _Call, stop: asyncio.Event | None) -> Budget:
+def _budget(req: AskRequest, cfg: Config, stop: asyncio.Event | None) -> Budget:
     """The tier's bounds; at deep, tokens from --budget, else ORACLE_DEEP_BUDGET, else
     DEEP_BUDGET (`unlimited` only when the caller or the config says so)."""
-    if call.level != "deep":
-        return Budget.for_tier(call.level, stop=stop)
+    if req.level != "deep":
+        return Budget.for_tier(req.level, stop=stop)
     try:
-        tokens = parse_budget(call.req.budget or call.cfg.deep_budget, DEEP_BUDGET)
+        tokens = parse_budget(req.budget or cfg.deep_budget, DEEP_BUDGET)
     except ValueError as exc:  # --budget is checked by the CLI; this is the config's value
         raise ConfigError(f"deep budget (ORACLE_DEEP_BUDGET or deep_budget): {exc}") from None
     return Budget.for_tier("deep", tokens, stop)
@@ -312,28 +304,16 @@ def _when(call: _Call) -> str:
     return call.window.describe() if call.window else now
 
 
-def _reconcile(call: _Call, trace: Trace | None) -> AskRequest:
-    """Requests the levels cannot honour as asked, adjusted with a note. A nested call never
-    rises above the tier its guard allows, so there --script below deep is dropped."""
-    if call.req.script and call.req.level != "deep":
-        if trace is not None and trace.ceiling not in (None, "deep"):
-            call.req = replace(call.req, script=False)
-            call.notes.append(
-                f"note: --script needs deep; this nested call runs at {call.req.level}"
-            )
-        else:
-            call.req = replace(call.req, level="deep")
-            call.notes.append("note: --script runs at deep; the level was raised")
-    if call.req.breadth and call.req.level == "quick":
-        call.req = replace(call.req, breadth=False)
-        call.notes.append("note: --breadth needs more than one step; ignored at quick")
-    return call.req
+def _reconcile(req: AskRequest) -> tuple[AskRequest, list[str]]:
+    """A request the tier cannot honour as asked, adjusted with a note (the tier and --script
+    are settled by `enter_ask`)."""
+    if req.breadth and req.level == "quick":
+        note = "note: --breadth needs more than one step; ignored at quick"
+        return replace(req, breadth=False), [note]
+    return req, []
 
 
-def _runner(call: _Call, now: datetime) -> PlanRunner:
-    assert call.trace is not None
-    host = WorkflowHost(call.cfg, call.registry, call.trace, call.models)
-    executor = Executor(call.registry, call.cfg.tool_env(), call.cfg.spill_dir, host)
+def _runner(call: _Call, executor: Executor, now: datetime) -> PlanRunner:
     builtins = call.window.builtins() if call.window else default_builtins(now)
     return PlanRunner(call.registry, executor, builtins=builtins)
 
@@ -690,8 +670,8 @@ async def _log(call: _Call, answer: Answer, runs: list[StepRun]) -> None:
                 ran_level=answer.level,
                 replans=answer.replans,
                 script=_code(call),
-                trace_id=call.trace.trace_id if call.trace else None,
-                depth=call.trace.depth if call.trace else 0,
+                trace_id=call.trace.trace_id,
+                depth=call.trace.depth,
             )
         )
         report = [call.script.report_run] if call.script and call.script.report_run else []

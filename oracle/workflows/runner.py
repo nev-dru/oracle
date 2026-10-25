@@ -11,23 +11,25 @@ import importlib
 import inspect
 import sys
 import types
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from oracle.exec.executor import TOOL_SLOTS, Executor
 from oracle.workflows.protocol import (
     CURRENT_TRACE,
     MissingWorkflow,
     Trace,
     WorkflowBudget,
     WorkflowContext,
-    clamp,
+    enter_ask,
 )
 
 if TYPE_CHECKING:
     from oracle.config import Config
-    from oracle.exec.executor import Executor, OpResult
+    from oracle.exec.executor import OpResult
     from oracle.registry.loader import Registry
     from oracle.registry.schema import Op, Tool
     from oracle.render import Answer
@@ -118,19 +120,35 @@ class OracleClient:
         Raises GuardError on a cycle, too deep a chain, or the workflow's budget."""
         from oracle.ask import AskRequest, ask  # the full pipeline, only when a workflow asks
 
-        parent = self.host.current()
-        tier, note = clamp(parent.level, level)
-        child = parent.enter("oracle", "ask", question, level=tier)
-        reserved = self.budget.reserve(tier)
-        if note:
-            self.notes.append(note)
-        req = AskRequest(question, level=tier, **request)
+        entry = enter_ask(self.host.current(), question, level, bool(request.get("script")))
+        reserved = self.budget.reserve(entry.asked)
+        if entry.clamped:
+            self.notes.append(entry.clamped)
+        req = AskRequest(question, **{**request, "level": entry.level, "script": entry.script})
         actual = reserved
         try:
             answer = await ask(
-                req, self.host.cfg, self.host.registry, self.host.models, trace=child
+                req, self.host.cfg, self.host.registry, self.host.models, entry=entry
             )
             actual = answer.model_calls
         finally:
             self.budget.settle(reserved, actual)
         return answer
+
+
+@contextmanager
+def call_scope(
+    cfg: "Config", registry: "Registry", trace: Trace, models: Any = None
+) -> Iterator[Executor]:
+    """One call's tool access: an executor whose workflow ops can nest oracle calls, the trace
+    those nested calls see, and per-tool concurrency shared with any call this one is nested
+    in, so nested calls cannot multiply a tool's limit."""
+    host = WorkflowHost(cfg, registry, trace, models)
+    token = CURRENT_TRACE.set(trace)
+    shared = TOOL_SLOTS.get()
+    slots = TOOL_SLOTS.set({} if shared is None else shared)
+    try:
+        yield Executor(registry, cfg.tool_env(), cfg.spill_dir, host)
+    finally:
+        TOOL_SLOTS.reset(slots)
+        CURRENT_TRACE.reset(token)

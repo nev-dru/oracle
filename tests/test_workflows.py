@@ -12,7 +12,7 @@ from oracle.config import REPO_ROOT, Config, load_config
 from oracle.exec.executor import Executor
 from oracle.log.store import open_store
 from oracle.registry.loader import Registry, load_registry
-from oracle.workflows.protocol import GuardError, Trace, clamp
+from oracle.workflows.protocol import GuardError, Trace, enter_ask
 from oracle.workflows.runner import WorkflowHost
 from tests.conftest import DONE, REGISTRY, echo_distiller, plan, scripted
 
@@ -92,12 +92,42 @@ async def test_nested_ask_runs_one_tier_lower(wf_cfg: Config, wf_registry: Regis
     assert inner_trace == outer_row[3] and outer_row[2] == 1  # the root is the first link
 
 
-def test_clamp() -> None:
-    assert clamp("deep", None) == ("standard", None)
-    assert clamp("standard", None) == ("quick", None)
-    assert clamp("quick", None) == ("quick", None)
-    assert clamp("standard", "deep")[0] == "standard" and clamp("standard", "deep")[1]
-    assert clamp("deep", "quick") == ("quick", None)
+@pytest.mark.parametrize(
+    ("parent", "asked", "script", "level", "kept", "clamped", "note"),
+    [
+        (None, None, False, "standard", False, False, None),  # a root call
+        (None, "quick", True, "deep", True, False, "--script runs at deep"),
+        ("deep", None, False, "standard", False, False, None),  # one lower by default
+        ("standard", None, False, "quick", False, False, None),
+        ("quick", None, False, "quick", False, False, None),
+        ("deep", "quick", False, "quick", False, False, None),
+        ("standard", "deep", False, "standard", False, True, None),  # never above the parent
+        ("deep", None, True, "deep", True, False, "--script runs at deep"),  # the parent allows it
+        ("standard", "standard", True, "standard", False, False, "--script needs deep"),
+    ],
+)
+def test_an_ask_enters_at_the_tier_its_parent_allows(
+    parent: str | None,
+    asked: str | None,
+    script: bool,
+    level: str,
+    kept: bool,
+    clamped: bool,
+    note: str | None,
+) -> None:
+    outer = Trace.root(parent).enter("oracle", "ask", "outer") if parent else None
+    entry = enter_ask(outer, "inner", asked, script)
+    assert (entry.level, entry.script, bool(entry.clamped)) == (level, kept, clamped)
+    assert entry.trace.level == level and entry.trace.depth == (2 if parent else 1)
+    assert entry.trace.ceiling == (parent or level)
+    assert [n for n in entry.notes if note and note in n] == list(entry.notes)
+    assert bool(entry.notes) == bool(note)
+
+
+def test_the_logged_tier_is_the_one_asked_before_script_raised_it() -> None:
+    outer = Trace.root("deep").enter("oracle", "ask", "outer")
+    assert enter_ask(outer, "inner", "standard", script=True).asked == "standard"
+    assert enter_ask(None, "q", "quick", script=True).asked == "quick"
 
 
 def test_trace_round_trips_and_guards() -> None:

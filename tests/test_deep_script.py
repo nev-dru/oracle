@@ -11,7 +11,7 @@ from oracle.config import Config
 from oracle.deep.bridge import flatten, report_runs
 from oracle.log.store import open_store
 from oracle.registry.loader import Registry
-from oracle.workflows.protocol import Trace
+from oracle.workflows.protocol import Trace, enter_ask
 from tests.conftest import _final, echo_distiller, prompt_text
 
 QUESTION = "what is going on with the ingestion gateway 5xx errors"
@@ -172,11 +172,11 @@ async def test_a_nested_script_may_rise_to_a_deep_parent(
 ) -> None:
     """Under a deep parent a nested call defaults to standard, and --script may still raise
     it to deep: the parent's tier is the ceiling, not the child's own."""
-    trace = Trace.root("deep").enter("oracle", "ask", "outer")
-    trace = trace.enter("oracle", "ask", QUESTION, level="standard")
-    req = AskRequest(QUESTION, level="standard", script=True)
+    outer = Trace.root("deep").enter("oracle", "ask", "outer")
+    entry = enter_ask(outer, QUESTION, None, script=True)
+    req = AskRequest(QUESTION, level=entry.level, script=entry.script)
     answer = await ask(
-        req, home_cfg, fake_registry, models(scripter=scripter(CHAIN_SCRIPT)), trace=trace
+        req, home_cfg, fake_registry, models(scripter=scripter(CHAIN_SCRIPT)), entry=entry
     )
     assert answer.level == "deep" and answer.script is not None
 

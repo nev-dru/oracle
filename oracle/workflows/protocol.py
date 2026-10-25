@@ -95,7 +95,51 @@ class Trace:
 CURRENT_TRACE: ContextVar[Trace | None] = ContextVar("oracle_trace", default=None)
 
 
-def clamp(parent: str, asked: str | None) -> tuple[str, str | None]:
+@dataclass(frozen=True)
+class AskEntry:
+    """How one oracle call enters the guard: what `enter_ask` decided."""
+
+    trace: Trace
+    """This call's link in the chain; nested calls below it see this trace."""
+    level: str
+    """The tier the call runs at."""
+    script: bool
+    """Whether --script stays."""
+    asked: str
+    """The tier before --script raised it: what the log records as asked."""
+    clamped: str | None = None
+    """Why a nested call runs below the tier it asked for, for its caller to pass on."""
+    notes: tuple[str, ...] = ()
+    """What the answer reports about --script and the tier."""
+
+
+def enter_ask(
+    parent: Trace | None, question: str, asked: str | None, script: bool = False
+) -> AskEntry:
+    """The trace, tier and --script an oracle call runs with; `parent` None is a root call.
+
+    A root call runs at the tier asked (standard by default). A nested call runs no higher than
+    its parent, one lower by default. --script needs deep: it raises the tier when the parent
+    allows deep (or at the root), and is dropped otherwise. Raises GuardError on a cycle or too
+    deep a chain."""
+    if parent is None:
+        tier, clamped = asked or "standard", None
+    else:
+        tier, clamped = _clamp(parent.level, asked)
+    level, notes = tier, ()
+    if script and tier != "deep":
+        if parent is None or parent.level == "deep":
+            level, notes = "deep", ("note: --script runs at deep; the level was raised",)
+        else:
+            script, notes = False, (f"note: --script needs deep; this nested call runs at {tier}",)
+    if parent is None:
+        trace = Trace.root(level).enter("oracle", "ask", question)
+    else:
+        trace = parent.enter("oracle", "ask", question, level=level)
+    return AskEntry(trace, level, script, tier, clamped, notes)
+
+
+def _clamp(parent: str, asked: str | None) -> tuple[str, str | None]:
     """(the tier a nested call runs at, a note when it differs from what was asked)."""
     top = TIERS.index(parent) if parent in TIERS else 1
     if asked is None:

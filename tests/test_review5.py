@@ -23,7 +23,7 @@ from oracle.registry.codegen import build_library, sources
 from oracle.registry.loader import Registry
 from oracle.registry.schema import Tool
 from oracle.render import findings_from
-from oracle.workflows.protocol import GuardError, Trace, WorkflowBudget
+from oracle.workflows.protocol import GuardError, Trace, WorkflowBudget, enter_ask
 from tests.conftest import DONE, echo_distiller, plan, scripted
 from tests.test_workflows import executor, wf_cfg, wf_registry  # noqa: F401 (fixtures)
 
@@ -54,13 +54,14 @@ async def test_a_nested_ask_carries_its_own_trace(wf_cfg: Config, wf_registry: R
 async def test_a_nested_script_request_stays_under_its_parent(
     home_cfg: Config, fake_registry: Registry
 ) -> None:
-    trace = Trace.root("standard").enter("oracle", "ask", "outer", level="standard")
+    outer = Trace.root("standard").enter("oracle", "ask", "outer")
     step = {"id": "s1", "op": "acli.jira.get", "params": {"key": "OPS-1206"}}
     models = Models(
         planner=scripted(plan(step)), checker=scripted(DONE), distiller=echo_distiller()
     )
     req = AskRequest("who owns OPS-1206", level="standard", script=True)
-    answer = await ask(req, home_cfg, fake_registry, models, trace=trace)
+    entry = enter_ask(outer, req.question, req.level, req.script)
+    answer = await ask(req, home_cfg, fake_registry, models, entry=entry)
     assert answer.level == "standard" and answer.script is None
     assert any("--script needs deep" in n for n in answer.notes)
 
