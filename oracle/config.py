@@ -37,6 +37,9 @@ class Config:
     profile: Profile | None
     models: dict[str, str]
     timezone: str | None
+    deep_budget: str | int | None = None
+    """Default model-token budget for a deep crawl (ORACLE_DEEP_BUDGET); `unlimited` is allowed
+    but never chosen by the oracle itself."""
 
     @property
     def log_path(self) -> Path:
@@ -82,6 +85,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         profile=profile,
         models=_models(env, data),
         timezone=_pick("ORACLE_TZ", "timezone", env, data),
+        deep_budget=_pick("ORACLE_DEEP_BUDGET", "deep_budget", env, data),
     )
 
 

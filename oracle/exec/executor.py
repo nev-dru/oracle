@@ -9,9 +9,10 @@ import contextlib
 import json
 import time
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from oracle.exec.parse import ParseError, parse_output
 from oracle.exec.pointers import pointer_for, record_id
@@ -23,6 +24,10 @@ from oracle.registry.loader import Registry
 from oracle.registry.params import ParamError, validate_params
 from oracle.registry.safety import rendered_problem
 from oracle.registry.schema import Op, Tool
+from oracle.workflows.protocol import GuardError, MissingWorkflow
+
+if TYPE_CHECKING:
+    from oracle.workflows.runner import WorkflowHost
 
 Status = Literal["ok", "error", "not_configured", "invalid", "skipped", "unavailable"]
 STDERR_TAIL = 400
@@ -43,6 +48,8 @@ class OpResult:
     bytes: int = 0
     ms: int = 0
     argv: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    """A workflow's own notes (`ctx.log`, tier clamps), shown with the answer's notes."""
 
     @property
     def ok(self) -> bool:
@@ -55,14 +62,32 @@ class OpFailed(Exception):
         self.status: Status = status
 
 
+TOOL_SLOTS: ContextVar[dict[str, asyncio.Semaphore] | None] = ContextVar(
+    "oracle_tool_slots", default=None
+)
+"""Per-tool concurrency slots shared by an oracle call and every call nested in it, so a
+workflow's nested asks never run more of one tool at once than its limit."""
+REAP_S = 2.0  # a killed tool that has not exited by then is left to the OS
+
+
 class Executor:
-    def __init__(self, registry: Registry, env: dict[str, str], spill_dir: Path) -> None:
+    def __init__(
+        self,
+        registry: Registry,
+        env: dict[str, str],
+        spill_dir: Path,
+        workflows: "WorkflowHost | None" = None,
+    ) -> None:
         self.registry = registry
         self.env = env
         self.spill_dir = spill_dir
-        self._sems = {
-            name: asyncio.Semaphore(t.limits.concurrency) for name, t in registry.tools.items()
-        }
+        self.workflows = workflows
+        if workflows is not None:
+            workflows.executor = self
+        shared = TOOL_SLOTS.get()
+        self._sems = shared if shared is not None else {}
+        for name, t in registry.tools.items():
+            self._sems.setdefault(name, asyncio.Semaphore(t.limits.concurrency))
 
     async def run(self, ref: str, raw_params: dict[str, Any]) -> OpResult:
         result = OpResult(op=ref, params=dict(raw_params))
@@ -102,11 +127,13 @@ class Executor:
 
     async def _page(self, tool: Tool, op: Op, result: OpResult, cursor: Any) -> tuple[bytes, Any]:
         """Fetch and parse one page; return its raw bytes and the next cursor, if any."""
-        if op.mcp_tool and tool.mcp:
-            raw = await self._mcp(tool, op, result)
+        if op.entry or (op.mcp_tool and tool.mcp):
+            raw = await (
+                self._workflow(tool, op, result) if op.entry else self._mcp(tool, op, result)
+            )
             result.pages += 1
             self._parse_page(tool, op, raw, result)
-            return raw, None  # MCP results are not paged
+            return raw, None  # MCP and workflow results are not paged
         params = dict(result.params)
         if op.paginate:
             params[op.paginate.param] = cursor
@@ -119,6 +146,30 @@ class Executor:
         doc = self._parse_page(tool, op, raw, result)
         return raw, jsonpath.first(doc, op.paginate.next) if op.paginate else None
 
+    async def _workflow(self, tool: Tool, op: Op, result: OpResult) -> bytes:
+        """In-process and trusted; no tool semaphore, so a workflow that reaches itself is
+        refused by the guard instead of waiting on its own slot."""
+        if self.workflows is None:
+            raise OpFailed("not_configured", "workflows run only inside an oracle call")
+        result.argv = [f"workflow:{op.entry}"]
+        try:
+            value, result.notes = await self.workflows.run(tool, op, result.params)
+        except GuardError as exc:
+            raise OpFailed("invalid", f"refused: {exc}") from None
+        except MissingWorkflow as exc:
+            raise OpFailed("not_configured", str(exc)) from None
+        except TimeoutError:
+            raise OpFailed("error", "the workflow ran out of time") from None
+        except Exception as exc:  # a bug in the workflow body, not a bad call (KeyError too)
+            raise OpFailed("error", f"{type(exc).__name__}: {exc}") from None
+        return json.dumps(value, default=str).encode()
+
+    def _env(self) -> dict[str, str]:
+        """The tool environment plus the trace, so a tool that runs `oracle` stays guarded."""
+        if self.workflows is None:
+            return self.env
+        return self.env | {"ORACLE_TRACE": self.workflows.current().to_env()}
+
     async def _mcp(self, tool: Tool, op: Op, result: OpResult) -> bytes:
         """An MCP tool takes the op's params as its arguments (unset ones left out)."""
         assert tool.mcp is not None and op.mcp_tool is not None
@@ -127,7 +178,7 @@ class Executor:
         async with self._sems[tool.name]:
             try:
                 text = await call_mcp(
-                    tool.mcp, op.mcp_tool, arguments, self.env, tool.limits.timeout_s
+                    tool.mcp, op.mcp_tool, arguments, self._env(), tool.limits.timeout_s
                 )
             except McpError as exc:
                 raise OpFailed(exc.status, str(exc)) from None
@@ -160,36 +211,52 @@ class Executor:
         return doc
 
     async def _spawn(self, tool: Tool, argv: list[str], stdin: str | None) -> bytes:
-        timeout = tool.limits.timeout_s
         async with self._sems[tool.name]:
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *argv,
-                    stdin=asyncio.subprocess.PIPE
-                    if stdin is not None
-                    else asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=self.env,
-                )
-            except FileNotFoundError:
-                raise OpFailed("not_configured", f"{argv[0]!r} is not on PATH") from None
-            except OSError as exc:
-                raise OpFailed("error", f"cannot run {argv[0]!r}: {exc.strerror or exc}") from None
-            try:
-                out, err = await asyncio.wait_for(
-                    proc.communicate(stdin.encode() if stdin is not None else None), timeout
-                )
-            except TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                await proc.wait()
-                raise OpFailed("error", f"timed out after {timeout:g}s") from None
+            proc = await self._start(argv, stdin)
+            out, err = await self._communicate(proc, stdin, tool.limits.timeout_s)
         code = proc.returncode or 0
         if code != 0:
             tail = err.decode("utf-8", "replace").strip()[-STDERR_TAIL:]
             raise OpFailed("error", f"exit {code}: {tail or '(no stderr)'}")
         return out
+
+    async def _start(self, argv: list[str], stdin: str | None) -> asyncio.subprocess.Process:
+        try:
+            return await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=self._env(),
+                # its own process group: the Ctrl-C that asks a crawl to stop after this hop
+                # reaches the oracle, not the tools the hop is waiting on
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            raise OpFailed("not_configured", f"{argv[0]!r} is not on PATH") from None
+        except OSError as exc:
+            raise OpFailed("error", f"cannot run {argv[0]!r}: {exc.strerror or exc}") from None
+
+    @staticmethod
+    async def _communicate(
+        proc: asyncio.subprocess.Process, stdin: str | None, timeout: float
+    ) -> tuple[bytes, bytes]:
+        try:
+            return await asyncio.wait_for(
+                proc.communicate(stdin.encode() if stdin is not None else None), timeout
+            )
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
+            raise OpFailed("error", f"timed out after {timeout:g}s") from None
+        except asyncio.CancelledError:  # Ctrl-C, a workflow's time limit: no orphan tools
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                async with asyncio.timeout(REAP_S):  # reaped, not left a zombie
+                    await proc.wait()
+            raise
 
     def _spill(self, raw: bytes, cap: int, op: Op, result: OpResult) -> None:
         """Write the full output to a file and keep only the records that fit under the cap."""

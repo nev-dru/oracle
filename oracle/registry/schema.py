@@ -65,6 +65,16 @@ class Example(Strict):
     expect: Expect = Field(default_factory=Expect)
 
 
+ENTRY = r"^oracle_workflows\.[a-z_][a-z0-9_]*:[a-z_][a-z0-9_]*$"
+
+
+class OpBudget(Strict):
+    """A workflow's own limits: nested oracle calls and wall-clock seconds."""
+
+    model_calls: int | None = Field(default=None, ge=0)
+    wall_s: float | None = Field(default=None, gt=0)
+
+
 class Op(Strict):
     name: str = Field(pattern=OP_NAME)
     when: str
@@ -73,6 +83,12 @@ class Op(Strict):
     mcp_tool: str | None = Field(
         default=None, description="the MCP tool to call, for a tool with an `mcp` server"
     )
+    entry: str | None = Field(
+        default=None,
+        pattern=ENTRY,
+        description="the function to run, `oracle_workflows.<module>:<fn>`, for a workflow",
+    )
+    budget: OpBudget | None = None
     returns: Returns = Field(default_factory=Returns)
     paginate: Paginate | None = None
     chains_to: list[str] = Field(default_factory=list)
@@ -81,8 +97,13 @@ class Op(Strict):
 
     @model_validator(mode="after")
     def _placeholders_are_params(self) -> "Op":
-        if bool(self.argv) == bool(self.mcp_tool):
-            raise ValueError("an op has exactly one of argv (a CLI) or mcp_tool (an MCP tool)")
+        if [bool(self.argv), bool(self.mcp_tool), bool(self.entry)].count(True) != 1:
+            raise ValueError(
+                "an op has exactly one of argv (a CLI), mcp_tool (an MCP tool) "
+                "or entry (a workflow)"
+            )
+        if self.paginate and self.entry:
+            raise ValueError("a workflow op does not page")
         known = set(self.params) | ({self.paginate.param} if self.paginate else set())
         for item in self.argv:
             for ref in placeholder_params(item):
@@ -117,6 +138,8 @@ class Tool(Strict):
     auth: Auth = Field(default_factory=Auth)
     limits: Limits = Field(default_factory=Limits)
     mutating: bool = False
+    kind: Literal["tool", "workflow"] = "tool"
+    """A workflow is trusted Python under the profile's workflows/, run in-process."""
     skills: list[str] = Field(default_factory=list, description="tool-scoped skills to attach")
     mcp: McpServer | None = None
     ops: list[Op] = Field(min_length=1)
@@ -126,6 +149,10 @@ class Tool(Strict):
         wrong = [op.name for op in self.ops if bool(op.mcp_tool) != bool(self.mcp)]
         if wrong:
             raise ValueError(f"ops {wrong}: use mcp_tool exactly when the tool has an mcp server")
+        workflow = self.kind == "workflow"
+        wrong = [op.name for op in self.ops if bool(op.entry) != workflow]
+        if wrong:
+            raise ValueError(f"ops {wrong}: use entry exactly when the tool is a workflow")
         return self
 
     @model_validator(mode="after")

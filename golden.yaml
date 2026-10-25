@@ -51,3 +51,11 @@ cases:
       coverage_names_no_match_sources: true
       pointers: []
     judge: "Role and team come from workiq with a pointer; recent tickets or messages are listed with pointers; any source with no match is stated as no match, never guessed."
+  - id: crawl-gateway-5xx
+    query: "what is going on with the ingestion gateway 5xx errors"
+    level: deep
+    expect:
+      crawl_hops_min: 3
+      findings_min: 3
+      pointers: ["jira:OPS-1206", "conf:90011", "people:u-1003"]
+    judge: "Findings cover the open ticket, the gateway runbook and who wrote it (Priya Raman, her role), each with a pointer; Coverage lists the crawl's hops; nothing is invented."

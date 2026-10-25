@@ -1,4 +1,4 @@
-.PHONY: build lint test fixtures gate-m1 gate-m2 gate-m3
+.PHONY: build lint test fixtures gate-m1 gate-m2 gate-m3 gate-m4
 
 PY := oracle tests
 FIXTURE_REPO := $(CURDIR)/tests/fakes/acme
@@ -38,6 +38,16 @@ gate-m2: fixtures test
 # M3 gate: ranker top-3 >= 90% on ranker_eval.yaml, every manifest example green, golden still
 # green. The golden part spends model calls (see gate-m2).
 gate-m3: fixtures test
+	ORACLE_PROFILE=home uv run --all-extras oracle tool test
+	ORACLE_PROFILE=home uv run --all-extras oracle tool test --ranker
+	ORACLE_PROFILE=home uv run --all-extras oracle eval
+
+# M4 gate: a crawl chain promoted to a recipe through the logs (`oracle dream`, then
+# `oracle dream --accept`), and everything M3 checked, including the crawl acceptance case.
+# The golden part spends model calls (see gate-m2).
+gate-m4: fixtures test
+	# a recipe `oracle dream --accept` installed: only dream writes "Learned from N crawls"
+	grep -l "Learned from [0-9]* crawls" profiles/home/recipes/learned.*.yaml
 	ORACLE_PROFILE=home uv run --all-extras oracle tool test
 	ORACLE_PROFILE=home uv run --all-extras oracle tool test --ranker
 	ORACLE_PROFILE=home uv run --all-extras oracle eval

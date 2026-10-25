@@ -1,0 +1,17 @@
+name: learned.chain_1
+when: 'Full content of one Confluence page by id. Then: Look up a person by name or email: title, department,
+  manager, office. Primary source for ''who is X''. (its `name` from `author`) Learned from 3 crawls,
+  e.g. "what is going on with the ingestion gateway 5xx errors".'
+params:
+  id:
+    type: str
+    required: true
+steps:
+- id: s1
+  op: acli.confluence.get
+  params:
+    id: '{id}'
+- id: s2
+  op: workiq.people.lookup
+  params:
+    name: $s1.results[0].author

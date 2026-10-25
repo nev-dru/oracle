@@ -34,8 +34,7 @@ from oracle.registry.importers.cli_draft import (
 from oracle.registry.importers.cli_probe import probe_cli
 from oracle.registry.importers.infer import infer_returns
 from oracle.registry.jsonpath import get_field
-from oracle.registry.loader import Registry
-from oracle.registry.safety import op_problem
+from oracle.registry.loader import Registry, refusal
 from oracle.registry.schema import NAME, Example, Expect, Op, Returns, Tool
 
 
@@ -512,9 +511,8 @@ def activate(cfg: Config, name: str) -> Path:
         raise IngestError(f"staged manifest is not valid: {exc}") from None
     if tool.name != name:
         raise IngestError(f"staged manifest is named {tool.name!r}, not {name!r}")
-    unsafe = {op.name: p for op in tool.ops if (p := op_problem(op.argv, op.mcp_tool, op.params))}
-    if unsafe:
-        raise IngestError(f"refused, the staged manifest is not read-only: {unsafe}")
+    if problem := refusal(tool):
+        raise IngestError(f"the staged manifest is not read-only: {problem}")
     cfg.registry_dir.mkdir(parents=True, exist_ok=True)
     target.write_text(source.read_text())
     return target

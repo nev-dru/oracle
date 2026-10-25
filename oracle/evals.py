@@ -104,7 +104,12 @@ def _found_nothing(rows: list[dict[str, Any]]) -> set[str]:
     return {r["op"] for r in rows if r["status"] in quiet} - found
 
 
+def _hops(a: Answer, want: int, _e: dict, _r: Registry) -> str | None:
+    return None if a.hops >= want else f"the crawl ran {a.hops} hops"
+
+
 CLAUSES: dict[str, Clause] = {
+    "crawl_hops_min": _hops,
     "breadth": _breadth,
     "tools_any": _tools_any,
     "tools_all": _tools_all,

@@ -22,6 +22,9 @@ from oracle.registry.loader import Registry
 MAX_FINDINGS = 15
 
 
+PER_STEP = 25  # records of one step that distill sees
+
+
 class Item(BaseModel):
     text: str = Field(description="one short sentence: what this result says that matters")
     pointer: str = Field(description="exactly one pointer copied from the data")
@@ -97,7 +100,7 @@ async def run_distill(
         lines.append("Breadth: cover every source that returned something, most important first.")
     if check_gaps:
         lines.append("Gaps the check found: " + "; ".join(check_gaps))
-    lines += ["", digest(runs, registry, per_step=25, slice_chars=300)]
+    lines += ["", digest(runs, registry, per_step=PER_STEP, slice_chars=300)]
     pointers = {p for run in runs if run.result.ok for p in run.result.pointers}
     deps = DistillContext(pointers, set(registry.tools))
     result = await agent.run("\n".join(lines), deps=deps)

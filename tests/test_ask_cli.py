@@ -42,25 +42,24 @@ async def test_quick_ask_end_to_end(home_cfg: Config, fake_registry: Registry) -
     assert hit is not None and hit.op == "acli.jira.search"
 
 
-async def test_deep_runs_as_standard_and_says_so(home_cfg: Config, fake_registry: Registry) -> None:
+async def test_logged_level_is_the_level_that_ran(
+    home_cfg: Config, fake_registry: Registry
+) -> None:
     models = Models(
         planner=planner_choosing("workiq.people.lookup", name="andrew neville"),
         checker=scripted(DONE),
         distiller=echo_distiller(),
     )
-    req = AskRequest("who is andrew neville", level="deep")
-    answer = await ask(req, home_cfg, fake_registry, models)
-    assert any("not built yet" in n for n in answer.notes)
+    answer = await ask(AskRequest("who is andrew neville"), home_cfg, fake_registry, models)
     assert answer.findings[0].pointer == "people:u-1001"
     async with (
         open_store(home_cfg.log_path) as store,
         store.db.execute(
-            "SELECT level, ran_level, gaps FROM calls WHERE call_id = ?", (answer.call_id,)
+            "SELECT level, ran_level FROM calls WHERE call_id = ?", (answer.call_id,)
         ) as cur,
     ):
         row = await cur.fetchone()
-    assert row is not None and (row[0], row[1]) == ("deep", "standard")
-    assert "not built yet" not in row[2]
+    assert row is not None and (row[0], row[1]) == ("standard", "standard")
 
 
 async def test_failed_op_is_reported_in_coverage(home_cfg: Config, fake_registry: Registry) -> None:

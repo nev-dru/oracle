@@ -9,6 +9,8 @@ The oracle's agents never call function tools, so none are forwarded.
 
 import asyncio
 import json
+import os
+import weakref
 from typing import Any
 
 from pydantic_ai.messages import (
@@ -28,6 +30,32 @@ from pydantic_ai.usage import RequestUsage
 PREFIX = "claude-code:"
 MAX_TURNS = 3  # one answer plus the CLI's structured-output turn, with slack
 CALL_TIMEOUT_S = 120.0  # a hung `claude` process must not hang the main agent's Bash call
+
+
+# Each call is a Claude Code process of 0.2-0.6 GB sharing the user's subscription window; a
+# crawl hop would otherwise start dozens at once. rufalo caps the same route at 8.
+def _concurrency(default: int = 5) -> int:
+    """ORACLE_CLAUDE_CONCURRENCY, or the default when unset or not a positive number."""
+    try:
+        return max(1, int(os.environ.get("ORACLE_CLAUDE_CONCURRENCY", default)))
+    except ValueError:
+        return default
+
+
+MAX_CONCURRENT = _concurrency()
+_slots: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _slot() -> asyncio.Semaphore:
+    """One semaphore per event loop (tests run several loops in one process)."""
+    loop = asyncio.get_running_loop()
+    if loop not in _slots:
+        _slots[loop] = asyncio.Semaphore(MAX_CONCURRENT)
+    return _slots[loop]
+
+
 NO_THINKING = {"haiku"}
 RETRY = "Your previous answer was rejected. Fix it and answer again:\n"
 
@@ -53,7 +81,7 @@ async def _complete(alias: str, messages: list[ModelMessage], info: AgentInfo) -
     output = info.output_tools[0] if info.output_tools else None
     result: Any = None
     try:
-        async with asyncio.timeout(CALL_TIMEOUT_S):
+        async with _slot(), asyncio.timeout(CALL_TIMEOUT_S):
             stream = query(prompt=transcript(messages), options=_options(alias, info, output))
             async for msg in stream:
                 if isinstance(msg, ResultMessage):

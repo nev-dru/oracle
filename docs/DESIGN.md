@@ -31,6 +31,7 @@ Each decision names the alternative it rejects and the evidence behind it.
 | Rank **ops** grouped by tool, hybrid: exact name → BM25 → embeddings; replans condition on prior results | Rank tools only, semantic only, query only | Hybrid beats pure semantic because tool docs contain exact terms; conditioned retrieval beats query-only on multi-step benchmarks; hierarchical tool→op routing is what MCP-Zero and AnyTool converged on. |
 | Sonnet plans; Haiku only extracts and formats | Haiku everywhere for cost | Anthropic's own tool search does not support Haiku. Planning is where accuracy is decided. |
 | Deep tier is a hop-based crawl by default, and writes a script against the generated library when the chain needs code logic | Deep tier as a longer step loop; a recursive `oracle` call per extracted term | Code execution measured \~77% token and \~70% cost reduction at equal success, and chains and filtering are native in code. A crawl must read results to find terms of unknown kinds, which a script written up front cannot do; batching a whole hop keeps model calls per hop constant however many terms it has. |
+| Scripts are pure compute: every op a script calls goes back to the oracle over a pipe and runs through the executor (as built in M4) | The generated library runs the executor inside the script's process, with an environment allowlist | The script's process holds no secrets and starts no process, so a bad script can do nothing the ops cannot; the executor's checks, identical-call reuse, pointers and logging apply to script calls unchanged; a container later replaces one module. |
 | Read-only, enforced at the manifest level | Allow mutating ops behind a flag | Read-only sub-agents are the one multi-agent pattern both Anthropic and Cognition endorse. |
 | PydanticAI, model via config string | Claude Agent SDK | Work environment is Bedrock through LiteLLM; the oracle is a small typed agent, not a coding agent; structured output validation is the core need. |
 | Python, asyncio | Go | The workload is I/O-bound shell and HTTP calls; the GIL is irrelevant. Revisit only if a real sandbox or thousand-way fan-out appears. |
@@ -68,13 +69,16 @@ oracle "<question>" [--intent "<why you are asking>"] [--level quick|standard|de
        [--scope <tool[,tool]>] [--prefer <tool>] [--breadth] [--raw <pointer>]
        [--format md|json] [--session <id>]
        [--depth <hops>] [--budget <tokens>|unlimited]   # deep crawl only
+       [--script]                                       # deep: one script instead of a crawl
 oracle expand <pointer>        # fetch the full record behind a pointer
 oracle feedback <call_id> --useful yes|no [--note "..."]
-oracle tool add|test|list      # registry management
+oracle run <tool.op> key=value ...   # one op or workflow directly, JSON out
+oracle tool add|test|list|build      # registry management; build emits oracle_tools
 ```
 
 - `--intent` is optional but changes results: "where ownership transfer happens, I'm tracing a bug" ranks differently from the bare question.
 - `--level` defaults to `standard`. `quick` is one op, no completeness pass. `deep` enables the crawl (default for discovery questions) and the script runner.
+- `--script` writes one script against the shortlisted tools instead of crawling (and raises the level to `deep`). Choosing between crawl and script is explicit for now; the logs will show which questions want which before any automatic routing.
 - `--depth` and `--budget` bound a deep crawl: hops (default 3) and model tokens (default `ORACLE_DEEP_BUDGET`; `unlimited` leaves depth as the only limit).
 - `--breadth` forces fan-out across every applicable tool; the planner also turns it on by itself for discovery-shaped questions ("everything about", "who is", "what happened").
 - `--session` lets `expand` resolve pointers from earlier calls; Claude Code passes a stable id per conversation.
@@ -284,15 +288,15 @@ The crawl is the default deep strategy for discovery-shaped questions: search, r
 
 Stop when the hop depth is reached (default 3, `--depth`), when a hop yields no new terms, or when the budget is spent. Hop depth counts hops inside one invocation; it is not the recursion guard's call-tree depth.
 
-**Budget.** Tool calls cost no model tokens; extraction, planning and the summary do. Before each hop the crawl estimates its cost from the result sizes measured so far, keeps a reserve for the summary, and admits every new term if they fit. Only when they do not are terms admitted in relevance order until the budget is used, so there is no fixed top-k. `--budget <tokens>` sets it per call and `ORACLE_DEEP_BUDGET` sets the default. `--budget unlimited` leaves hop depth as the only limit and still keeps dedupe, per-tool concurrency (pacing, not a cap), a Ctrl-C that returns a summary of everything found so far, and a final cost line (tokens, searches, wall time). At home the crawl shares the Claude subscription with the main Claude Code session, so an unlimited crawl can spend the usage window the main session needs; at work it is Bedrock spend.
+**Budget.** Tool calls cost no model tokens; extraction, planning and the summary do. Before each hop the crawl estimates its cost from the result sizes measured so far, keeps a reserve for the summary, and admits every new term if they fit. Only when they do not are terms admitted in relevance order until the budget is used, so there is no fixed top-k. `--budget <tokens>` sets it per call and `ORACLE_DEEP_BUDGET` sets the default. `--budget unlimited` leaves hop depth as the only limit and still keeps dedupe, per-tool concurrency (pacing, not a cap), a Ctrl-C that returns a summary of everything found so far, and a final cost line (tokens, searches, wall time). At home the crawl shares the Claude subscription with the main Claude Code session, so an unlimited crawl can spend the usage window the main session needs; at work it is Bedrock spend. As built: the summary reserve is 20K tokens, or a quarter of a smaller budget; the first plan's searches count toward the cost line and the 400-call cap. Tools start in their own process group (argv tools by the executor, MCP servers by the mcp client), so the first Ctrl-C reaches only the oracle and the hop's tool calls finish; model processes are Claude Code's own children and still get it, so a model call that fails after the first Ctrl-C ends the crawl as `interrupted` (not a failed hop), and a summary it kills runs once more.
 
 **Summary.** Map then reduce: Haiku summarises each result in parallel, one Sonnet call merges them into the output contract. The contract does not change (3–15 findings with pointers); Coverage adds hops run, searches run, terms found but not expanded (with why: budget or depth) and the cost.
 
 **Why not a recursive `oracle` call per term.** The design allows nested calls (workflows use `ctx.oracle.ask()`, subprocesses carry `ORACLE_TRACE`), and recursion would reuse the whole pipeline. As the crawl's inner loop it costs more than it saves: every child runs its own plan, check and distill, so model calls grow with the number of terms instead of the number of hops; each child pays process start (and, at home, a Claude Code process of 0.2–0.6 GB, so a 50-term hop is 50 of them); siblings need a shared seen-set anyway to avoid re-searching each other's terms; and the recursion guard (depth 3, tier clamped one lower per level) would quietly turn hop 2 into a standard call and hop 3 into a quick one. Recursion stays the right tool when one term is itself a question that needs its own investigation: the extractor may mark a term `investigate`, and that term alone becomes a nested `oracle` call under the guard.
 
-**SDK.** The crawl is about 30 lines on a small `oracle.sdk` that model-written scripts and workflows use too: `extract(results)`, `fan_out(steps)`, `summarize(results)`, `crawl(question, depth, budget)` and the shared `budget`, on top of the generated per-op library below. A script that needs custom logic calls `crawl()` or its parts instead of re-implementing them, which keeps scripts short and their mistakes few. smolagents' CodeAgent and Cloudflare's Code Mode are the precedent for models writing code against a tool API; this stays a module inside the oracle, not a framework.
+**SDK.** The crawl is about 30 lines on a small `oracle.sdk` that model-written scripts and workflows use too: `extract(results)`, `fan_out(steps)`, `summarize(results)`, `crawl(question, depth, budget)` and the shared `budget`, on top of the generated per-op library below. A script that needs custom logic calls `crawl()` or its parts instead of re-implementing them, which keeps scripts short and their mistakes few. As built (M4): `oracle.sdk` is `budget`, `extract`, `hop`, `crawl` and `summarize`; fan-out is the PlanRunner's dependency waves, not a function; scripts cannot import `oracle.sdk` (the sandbox allows only `oracle_tools`) and run calls together with `gather`; workflows, trusted and in-process, can. smolagents' CodeAgent and Cloudflare's Code Mode are the precedent for models writing code against a tool API; this stays a module inside the oracle, not a framework.
 
-**Logging for dreaming.** Each op row records its hop and the term or pointer that led to it, so dreaming sees chains as sequences of op refs (`confluence.search → jira.get → jira.search(epic) → confluence.get`) with no entity types involved. A chain seen in three or more successful crawls becomes a recipe candidate, as for scripts.
+**Logging for dreaming.** Each op row records its hop, the term or pointer that led to it and its records' scalar fields (so chains are read per step, even when calls in one session share pointers), so dreaming sees chains as sequences of op refs (`confluence.search → jira.get → jira.search(epic) → confluence.get`) with no entity types involved. A chain seen in three or more successful crawls becomes a recipe candidate, as for scripts.
 
 **Proposed acceptance case (for the M4 gate; golden cases are the user's call).** The home fixtures already hold a three-hop chain: the Teams message "Ingestion gateway 5xx again during the Salesforce batch, I took OPS-1206" → `jira:OPS-1206` → the Confluence runbook "Runbook: ingestion gateway 5xx" → its author Priya Raman → `workiq.people.lookup`. Query: "what is going on with the ingestion gateway 5xx errors", at `deep`. Passes when the findings include the ticket, the runbook and Priya's role, each with a pointer, and Coverage lists the hops.
 
@@ -305,17 +309,17 @@ Scripts are for questions where the chain itself needs judgment at each hop that
 ```python
 from oracle_tools import code_search, code_graph
 
-hits = await code_search.search("ownership transfer", limit=30)
-frontier = {h.symbol_id for h in hits}
+hits = await code_search.search(query="ownership transfer", limit=30)
+frontier = {h["symbol_id"] for h in hits}
 seen, path = set(), []
-for _ in range(6):
-    callers = await code_graph.expand(ids=list(frontier - seen), direction="callers")
+for hop in range(6):
+    callers = await code_graph.expand(ids=sorted(frontier - seen), direction="callers")
     seen |= frontier
-    frontier = {c.symbol_id for c in callers if "api" in c.path}
+    frontier = {c["symbol_id"] for c in callers if "api" in c["path"]}
     path.extend(callers)
     if not frontier:
         break
-report(path)  # structured result the distill step reads
+report(path)  # structured result the summary reads
 ```
 
 **Script runner, v1 isolation.** The threat model is accidental damage by a model-written script, not an adversary: the user is the only caller and every tool is read-only. V1 isolation is therefore a subprocess with: a fresh temp working directory; an environment allowlist (only the variables the manifests name); `resource` limits on CPU seconds and memory; a wall-clock timeout; stdout captured and capped; and the generated library as the only import the prompt offers. The script cannot call `subprocess` or open sockets by convention, enforced by an AST check that rejects `subprocess`, `os.system`, `socket`, `requests` and friends before running. This is enough to stop a bad script from doing anything the ops themselves could not do.
@@ -323,6 +327,14 @@ report(path)  # structured result the distill step reads
 **What this does not do.** It does not stop a script from reading arbitrary files on the user's machine or exhausting the network through the ops. A container (Docker, or a lightweight sandbox) is milestone 4 and is only worth building if deep-tier calls become frequent, which the logs will show. The design keeps the runner behind one interface (`run_script(code, env) -> ScriptResult`) so swapping in a container changes one module.
 
 **Self-correction.** A script that raises is sent back to Opus once with the traceback; a second failure returns the partial `report()` output and the error in the trace. Deep-tier calls record the script in the log so successful ones can be promoted to recipes.
+
+**As built (M4, 2026-10-24).** The design above changed in one place: scripts do not run the executor. `oracle_tools` is a set of stubs generated into `~/.oracle/lib/<hash>/` (keyed by a hash of the sources, so a manifest change gives a new directory and nothing generated lands in the repo; `oracle tool build` makes it ahead of time). Each stub sends its op and params to the parent over a pipe; the parent runs the call as a plan step on the call's PlanRunner, so validation, the read-only checks, identical-call reuse (a corrected script re-runs nothing), pointers, Coverage and the ops log apply to script calls exactly as to plan steps. The child is `python -I -S -B deep/child.py` with an empty environment, a temp working directory, `RLIMIT_CPU`, `RLIMIT_FSIZE` 0, restricted builtins, a guarded importer, a wall-clock timeout and capped print output.
+
+- The static check is an allowlist (`deep/sandbox.py`) of syntax first: only the node types in `ALLOWED_NODES`, so `match` (whose patterns read attributes by name, with no attribute node to check), `with`, `yield`, `global` and any syntax a later Python adds are refused. Then imports only `oracle_tools`, `json`, `re`, `itertools`, `collections`, `math`, `datetime` (`typing` and `statistics` expose `sys`, `operator.attrgetter` and `functools.update_wrapper` take attribute names as strings); no name or attribute starting with `_`; no frame or code attributes (`gi_frame`, `f_back`, `f_globals`, ...); no methods that drive a coroutine by hand (`send`, `throw`, `get_loop`, ...: a coroutine stepped by hand hands back the event loop's futures); no classes, `eval`, `exec`, `open`, `getattr`, `type` and the like. The child hands a script each module without its submodules (`json.codecs` would reach files). 40 bypass cases are tests.
+- `gather` is a wrapper that returns a list, so a script sees only coroutines and lists, never the event loop's futures. A call the oracle fails for any reason still gets a reply (the script sees `ValueError`), and a lookup a failed attempt left in flight keeps running for the corrected attempt (shared lookups are shielded from a cancelled caller), which then owns it, so its pointers are logged under a step that finished. The child fails every pending call when the oracle's end of the pipe closes or sends a bad line. A correction is skipped when `--budget` or the deep wall clock cannot pay for it. Codegen leaves out a tool whose stub would not compile or would shadow `gather`/`report`, and removes libraries unused for a week. Script calls are literal steps: a `$` in a value is data, not a binding.
+- Records are plain dicts; each carries its pointer under `_pointer`. `report()` output is the summary's input: reported records go back under the op that produced them (its summary fields, its real pointer); anything else (counts, groupings) becomes one `script.report` result with `script:<call>#n` pointers, logged so they expand but kept out of Coverage and the trace. A pointer the script invents is dropped; output over the report cap is dropped with a gap saying so.
+- The writer is the `deep` model role (Opus; the planner model with a note when unset). A refused script goes back to it through the output validator before anything runs; a run-time failure goes back once with the traceback trimmed to the script's frames and the end of what it printed.
+- Known limits: `RLIMIT_AS` is not enforced on macOS, so memory is bounded only by the wall clock there; `str.format` can read attributes into a string (read-only, and the process holds nothing secret); scripts can call only the shortlisted tools; promoting repeated scripts to recipes waits for logs of real script calls.
 
 ## Logging, feedback and evaluation
 
@@ -368,7 +380,7 @@ Add to the set as misses appear. A query is only added with the tool list it *sh
 
 - **Name follow-up, full name** (after M2's completeness check): "who wrote the ownership transfer design and what team are they on" → `acli.confluence.search` → author → `workiq.people.lookup`. Passes when the findings carry the author's role and team with pointers.
 - **Name follow-up, first name only** (after M2): a fixture page that says only "Jon reviewed the gateway runbook", with two Jons in the directory. Passes when the findings list both candidates with the evidence for each and Coverage marks the ambiguity, or narrow to one using the page's evidence; never a silent pick.
-- **Deep crawl, three hops** (after M4): see "Deep tier: crawl".
+- **Deep crawl, three hops**: added to golden.yaml as `crawl-gateway-5xx` in M4 (2026-10-24), with the clause `crawl_hops_min`.
 
 ## Module layout and milestones
 
@@ -401,15 +413,20 @@ oracle/
     pointers.py     # pointer format, spill files, expand
   timewin.py        # "today", "this week", "past 3 days" -> absolute window in the user's zone
   evals.py          # oracle eval: golden clauses against what ran, plus the judge
+  sdk/              # budget.py, extract.py, hop.py, crawl.py, summarize.py: the deep crawl
   deep/
+    sandbox.py      # the allowlist AST check a script passes before it runs
+    child.py        # the script's process: stdlib only, restricted builtins, RPC on fd 1
+    runner.py       # run_script(): spawn the child, answer its calls, limits, capped output
+    bridge.py       # script calls -> plan steps; report() -> the summary's records
     script_agent.py # Opus agent that writes against oracle_tools
-    runner.py       # run_script(): subprocess, env allowlist, AST check, limits
+    scripted.py     # the deep script path: write, run, correct once
   log/
     store.py        # log.sqlite schema and writers
     report.py       # implicit signals, failure labelling
   workflows/
-    protocol.py     # WorkflowContext, Budget, Trace, OracleClient, ToolsClient
-    runner.py       # lazy import of entry points, recursion guard, budget sub-allocation
+    protocol.py     # WorkflowContext, WorkflowBudget, Trace (the guard), tier clamp
+    runner.py       # lazy import of entry points, OracleClient, ToolsClient, time bound
     ingest.py       # the tool ingestion workflow (probe, draft, verify, boundaries, evals, review)
   skills/
     loader.py       # role-static, tool-scoped, query-ranked skill selection
@@ -448,6 +465,8 @@ The same plan as a table, for exports that drop the drawing:
 
 M3 as built (2026-10-24): kubectl, argocd, es and mongo were added at home through `oracle tool add` against fakes, not hand-written; custom scripts are left until a seed query needs one; environment profiles shipped in M1. Ingestion has the CLI and MCP import paths; OpenAPI and GraphQL are deferred, as is registering ingestion as a workflow (M4). Gate: ranker top-3 97% (35 cases), 26/26 manifest examples, golden 4/4 with all 8 tools (about 16 s and 22K sub-agent tokens per case).
 | M4 Deep | Codegen of `oracle_tools`; `oracle.sdk` (extract, fan_out, summarize, crawl, budget); the crawl with `--depth` and `--budget`; script agent and runner with v1 isolation; `deep` tier; workflow protocol and recursion guard; dreaming workflow after a few weeks of logs; container only if deep calls are frequent | One deep-tier script or crawl chain promoted to a recipe through the logs; the crawl acceptance case passes (if adopted); golden set still green |
+
+M4 as built (2026-10-24; gate `make gate-m4` green 2026-10-25): codegen of `oracle_tools` stubs into `~/.oracle/lib/<hash>/`; the crawl (`--depth`, `--budget`); the script path (`--script`: Opus writes against the stubs, the RPC runner, one correction); workflows (`kind: workflow`, `oracle run`) and the recursion guard; `oracle dream` for crawl chains. Live gate at home: three crawls with the same shape produced `learned.chain_1` (a Confluence page, then its author in the directory), accepted through `oracle dream --accept` and used by a later crawl; ranker top-3 97%, 26/26 examples, the four original golden cases passed in all three runs. `crawl-gateway-5xx` failed four times before passing: the extractor now sees capped slices (as designed; it had seen summary fields only, so a search result's author was invisible), every followed result carries its term and why into the summary, the summary no longer merges a person into the document they wrote, and a backstop lists as plain findings the primary lookup of up to three followed terms (relevance 0.5 or more) that no finding cites, with a note. It then passed alone (7 model calls). The first full `make gate-m4` failed the crawl case once more: with `learned.chain_1` installed, the page and its author come from one recipe step under one followed term, and the backstop counted the cited page as that term's whole lookup. A recipe stage bound to an earlier stage's result is now a link with its own backstop check. The case then passed alone, and `make gate-m4` passed 5/5 (252 tests, 26/26 examples, ranker top-3 97%). Gate spend in total: about 170 model calls, roughly 1M tokens, against an estimate of 60.
 
 ### Developing on the personal laptop
 
@@ -541,12 +560,13 @@ ops:
 ```python
 async def investigate(params: InvestigateParams, ctx: WorkflowContext) -> Findings: ...
 
+
 class WorkflowContext:
-    oracle: OracleClient      # ctx.oracle.ask(query, level="standard") — depth-aware
-    tools: ToolsClient        # ctx.tools.run("kubectl.events", ...) — direct op calls
-    budget: Budget            # remaining model calls, tokens, wall time; shared across the tree
-    log: Logger               # writes under the same trace_id
-    trace: Trace              # trace_id, depth, chain of callers
+    oracle: OracleClient  # ctx.oracle.ask(query, level="standard") — depth-aware
+    tools: ToolsClient  # ctx.tools.run("kubectl.events", ...) — direct op calls
+    budget: Budget  # remaining model calls, tokens, wall time; shared across the tree
+    log: Logger  # writes under the same trace_id
+    trace: Trace  # trace_id, depth, chain of callers
 ```
 
 A workflow body can be a plain async function, a `pydantic-graph` graph, or a rufalo flow behind a ten-line adapter that maps this context onto rufalo's. The core does not import rufalo; workflow modules are lazy-imported only when that workflow runs, because the oracle is a CLI invoked dozens of times per session and import time is paid on every invocation. The recommendation is to start with plain async functions, use rufalo where a workflow already exists in it, and reach for a graph library only when a workflow needs branching state that functions make ugly. This follows the pattern Anthropic and Cognition both arrived at: compose simple pieces, adopt a framework when a concrete workflow demands it.
@@ -564,6 +584,10 @@ A workflow body can be a plain async function, a `pydantic-graph` graph, or a ru
 | Preference | Planner and script prompts say: call an op directly when one does the job; `ctx.oracle.ask()` is for questions that need ranking across tools. | — |
 
 Everything in a tree logs under one `trace_id`, so `oracle report` shows the whole call tree and where the budget went. The depth limit of 3 is a default to tune: with the current registry, nothing legitimate needs more than main agent → oracle → workflow → oracle.
+
+**As built (M4, 2026-10-24).** A workflow manifest has `kind: workflow`; each op has `entry: oracle_workflows.<module>:<fn>` instead of argv, and the module lives in `workflows/` next to the registry's `tools/` (trusted code, imported only when that workflow runs). The function is `async def fn(params: dict, ctx) -> list[dict] | dict`; its return value goes through the same parsing, redaction, caps and pointers as any tool's output, so a workflow that returns records with the pointers of the tools it called keeps them. `ctx.tools.run(ref, **params)` returns the executor's `OpResult` (never raises); `ctx.oracle.ask(question, level=None)` is a nested call that defaults one tier lower than its parent and never runs higher (clamped, with a note; a nested `--script` raises the tier to deep only when the parent is deep, and is dropped otherwise). Nested calls in one process share the root call's per-tool concurrency slots, so a workflow's parallel asks never run more of one tool at once than its limit. `ctx.log` lines and clamp notes appear in the answer's notes. Without `budget.wall_s` a workflow has 180 s. `budget.model_calls` caps nested calls by reserving each tier's estimate (quick 1, standard 4, deep 12) before the call starts and settling the actual count after, so calls started together cannot all slip past it. The trace rides in a context variable in-process and in `ORACLE_TRACE` for every tool and MCP server the executor starts, so `oracle` run by a tool is still inside the guard: depth over 3 or a repeated (kind, name, normalised input) is refused with the chain, as an `invalid` op in Coverage or, from the CLI, exit 2. The root call is the chain's first link (depth 1), so main agent → oracle → workflow → oracle is depth 3 and a tool that asks the root question again is a cycle; each oracle call sets the trace for everything under it. `oracle run <tool.op> key=value ...` calls one op or workflow directly, enters the guard as a `run` link, and logs the call so its pointers expand. A bug in a workflow body is an `error`; a missing module or function is `not_configured`. Calls record `trace_id` and `depth`.
+
+Not built yet: one budget per trace shared through `log.sqlite` (each call has its own budget; a workflow's `budget.model_calls` caps its nested calls and `budget.wall_s` its time); `oracle report` drawing the call tree; registering ingestion as a workflow, which writes staged files and so stays a command rather than an op the planner could choose.
 
 ## Caching, prior findings and remaining corner cases
 

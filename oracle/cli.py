@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
@@ -46,28 +47,181 @@ def _csv(value: str | None) -> list[str] | None:
 def ask_cmd(
     question: Annotated[str, typer.Argument(help="the question, in plain language")],
     intent: Annotated[str | None, typer.Option(help="why you are asking")] = None,
-    level: Annotated[str, typer.Option(help="quick|standard|deep")] = "standard",
+    level: Annotated[
+        str | None, typer.Option(help="quick|standard|deep (default standard)")
+    ] = None,
     scope: Annotated[str | None, typer.Option(help="only these tools, comma-separated")] = None,
     prefer: Annotated[str | None, typer.Option(help="favour these tools")] = None,
     breadth: Annotated[
         bool, typer.Option("--breadth", help="fan out across every applicable tool")
+    ] = False,
+    depth: Annotated[int, typer.Option(help="deep crawl: hops of searching", min=1)] = 3,
+    budget: Annotated[
+        str | None, typer.Option(help="deep crawl: model tokens, or 'unlimited'")
+    ] = None,
+    script: Annotated[
+        bool, typer.Option("--script", help="deep: write one script against the tools")
     ] = False,
     fmt: Format = "md",
     session: Session = None,
 ) -> None:
     """Find things across every registered source (the default command)."""
     # Imported here: pydantic-ai is the slow import, and expand and tool commands never need it.
-    from oracle.ask import LEVELS, AskRequest, ask
+    from oracle.ask import LEVELS, AskRequest
 
-    if level not in LEVELS:
+    if level is not None and level not in LEVELS:
         _die(f"--level must be one of {', '.join(LEVELS)}")
-    cfg, registry = _setup()
-    req = AskRequest(question, intent, level, _csv(scope), _csv(prefer), session, breadth)
+    from oracle.sdk.budget import parse_budget
+
     try:
-        answer = asyncio.run(ask(req, cfg, registry))
+        parse_budget(budget, 1)
+    except ValueError:
+        _die("--budget must be a positive number of tokens or 'unlimited'")
+    trace, level, note = _nested(question, level)
+    cfg, registry = _setup()
+    req = AskRequest(
+        question, intent, level, _csv(scope), _csv(prefer), session, breadth, depth, budget, script
+    )
+    if note:
+        typer.echo(f"oracle: {note}", err=True)
+    try:
+        answer = asyncio.run(_ask_interruptibly(req, cfg, registry, trace))
     except ConfigError as exc:
         _die(str(exc))
     typer.echo(to_json(answer) if fmt == "json" else to_markdown(answer))
+
+
+def _nested(question: str, level: str | None) -> tuple[Any, str, str | None]:
+    """(trace, level, note): inside ORACLE_TRACE this call is nested, so it enters the guard
+    (refused on a cycle or too deep) and runs no higher than its parent, one lower by default."""
+    from oracle.workflows.protocol import GuardError, Trace, clamp
+
+    parent = Trace.from_env(os.environ.get("ORACLE_TRACE"))
+    if parent is None:
+        return None, level or "standard", None
+    tier, note = clamp(parent.level, level)
+    try:
+        return parent.enter("oracle", "ask", question, level=tier), tier, note
+    except GuardError as exc:
+        _die(f"refused: {exc}")
+
+
+async def _ask_interruptibly(req: Any, cfg: Config, registry: Registry, trace: Any = None) -> Any:
+    """The first Ctrl-C ends a deep crawl at the next hop and still prints what it found; a
+    second one interrupts for real."""
+    import signal
+
+    from oracle.ask import ask
+
+    if req.level != "deep" or req.script:  # only a crawl has hops to stop between
+        return await ask(req, cfg, registry, trace=trace)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def first_interrupt() -> None:
+        stop.set()
+        loop.remove_signal_handler(signal.SIGINT)
+        typer.echo("oracle: stopping after this hop (Ctrl-C again to abort)", err=True)
+
+    loop.add_signal_handler(signal.SIGINT, first_interrupt)
+    try:
+        return await ask(req, cfg, registry, stop=stop, trace=trace)
+    finally:
+        loop.remove_signal_handler(signal.SIGINT)
+
+
+@app.command("run")
+def run_cmd(
+    ref: Annotated[str, typer.Argument(help="tool.op, or a tool that has one op")],
+    params: Annotated[
+        list[str] | None, typer.Argument(help="key=value ...; non-string values as JSON")
+    ] = None,
+    session: Session = None,
+) -> None:
+    """Run one op or workflow directly, through the executor, and print its records as JSON."""
+    from oracle.workflows.protocol import GuardError, Trace
+
+    cfg, registry = _setup()
+    ref = _op_ref(registry, ref)
+    values = _params(registry, ref, params or [])
+    parent = Trace.from_env(os.environ.get("ORACLE_TRACE")) or Trace.root("deep")
+    try:  # a tool that runs `oracle run` on itself is a cycle
+        trace = parent.enter("run", ref, values)
+    except GuardError as exc:
+        _die(f"refused: {exc}")
+    result = asyncio.run(_run_one(cfg, registry, ref, values, trace, session))
+    rows = [
+        {"pointer": p, "record": r} for p, r in zip(result.pointers, result.records, strict=True)
+    ]
+    out = {"op": ref, "status": result.status, "error": result.error, "results": rows}
+    typer.echo(json.dumps(out, indent=2, default=str))
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+def _op_ref(registry: Registry, ref: str) -> str:
+    tool = registry.tools.get(ref)
+    if tool is not None and len(tool.ops) == 1:
+        return f"{ref}.{tool.ops[0].name}"
+    if tool is not None:
+        names = ", ".join(f"{ref}.{op.name}" for op in tool.ops)
+        _die(f"{ref} has several ops; name one: {names}")
+    try:
+        registry.resolve(ref)
+    except KeyError:
+        _die(f"no op {ref!r}; see `oracle tool list`")
+    return ref
+
+
+def _params(registry: Registry, ref: str, pairs: list[str]) -> dict[str, Any]:
+    """key=value; a value is JSON (number, bool, list) unless the param is a string."""
+    op = registry.resolve(ref)[1]
+    values: dict[str, Any] = {}
+    for pair in pairs:
+        key, sep, raw = pair.partition("=")
+        if not sep:
+            _die(f"expected key=value, got {pair!r}")
+        param = op.params.get(key)
+        if param is None or param.type == "str":
+            values[key] = raw
+            continue
+        try:  # `flag=True` as well as `flag=true`
+            values[key] = json.loads(raw.lower() if param.type == "bool" else raw)
+        except json.JSONDecodeError as exc:
+            _die(f'{key} is {param.type}: {raw!r} is not JSON ({exc.msg}); e.g. 10, true, ["a"]')
+    return values
+
+
+async def _run_one(
+    cfg: Config,
+    registry: Registry,
+    ref: str,
+    values: dict[str, Any],
+    trace: Any,
+    session: str | None,
+) -> Any:
+    """Logged like a one-step call, so its pointers expand."""
+    import time
+    import uuid
+
+    from oracle.log.store import CallRecord
+    from oracle.workflows.runner import WorkflowHost
+
+    host = WorkflowHost(cfg, registry, trace)
+    executor = Executor(registry, cfg.tool_env(), cfg.spill_dir, host)
+    start = time.monotonic()
+    result = await executor.run(ref, values)
+    call_id = uuid.uuid4().hex[:12]
+    session = session or f"adhoc-{call_id}"
+    record = CallRecord(
+        call_id=call_id, session=session, query=f"run {ref} {json.dumps(values)}", intent=None,
+        level="run", ranked_tools=[], plan=None, wall_ms=int((time.monotonic() - start) * 1000),
+        confidence=None, trace_id=trace.trace_id, depth=trace.depth,
+    )  # fmt: skip
+    async with open_store(cfg.log_path) as store:
+        await store.record_call(record)
+        await store.record_op(call_id, session, "s1", result)
+    return result
 
 
 @app.command()
@@ -132,7 +286,11 @@ def tool_test(
     if unknown:
         problems = "".join(f"\n  problem: {p}" for p in registry.problems)
         _die(f"unknown tools {unknown}; active: {sorted(registry.tools)}{problems}")
-    executor = Executor(registry, cfg.tool_env(), cfg.spill_dir)
+    from oracle.workflows.protocol import Trace
+    from oracle.workflows.runner import WorkflowHost
+
+    host = WorkflowHost(cfg, registry, Trace.root("deep"))  # workflow examples run too
+    executor = Executor(registry, cfg.tool_env(), cfg.spill_dir, host)
     results = asyncio.run(run_examples(registry, executor, set(names) if names else None))
     raise typer.Exit(1 if _report(results, registry) else 0)
 
@@ -286,6 +444,18 @@ def tool_activate(name: Annotated[str, typer.Argument(help="a tool staged by `to
     typer.echo(f"next: oracle tool test {name}")
 
 
+@tool_app.command("build")
+def tool_build() -> None:
+    """Generate the `oracle_tools` library that deep-tier scripts import (also done on demand)."""
+    from oracle.registry.codegen import build_library
+
+    cfg, registry = _setup()
+    library = build_library(registry, cfg.home)
+    for problem in library.problems:
+        typer.echo(f"skipped: {problem}", err=True)
+    typer.echo(f"{library.path}  ({len(library.stubs)} tool modules)")
+
+
 @app.command()
 def report(
     days: Annotated[float, typer.Option(help="look back this many days")] = 7.0,
@@ -308,7 +478,38 @@ def report(
     typer.echo("\n".join(asyncio.run(run())))
 
 
-COMMANDS = {"ask", "expand", "tool", "feedback", "eval", "report", "--help", "-h"}
+@app.command("dream")
+def dream_cmd(
+    days: Annotated[float, typer.Option(help="look back this many days")] = 14.0,
+    min_calls: Annotated[int, typer.Option(help="a chain must repeat this often")] = 3,
+    accept_name: Annotated[
+        str | None, typer.Option("--accept", help="install a staged recipe by name")
+    ] = None,
+) -> None:
+    """Propose recipes from crawl chains that repeat in the log; `--accept` installs one.
+    Nothing is applied or committed without --accept."""
+    import yaml
+
+    from oracle.log.dream import accept, dream
+
+    cfg, _ = _setup()
+    if accept_name:
+        try:
+            typer.echo(f"accepted: {accept(cfg.home, cfg.registry_dir, accept_name)}")
+        except (OSError, ValueError, yaml.YAMLError) as exc:  # a corrupt staged file too
+            _die(str(exc))
+        typer.echo("next: oracle tool list, then oracle eval")
+        return
+
+    async def run() -> str:
+        async with open_store(cfg.log_path) as store:
+            result = await dream(store.db, cfg.registry_dir, cfg.home, days, min_calls)
+        return (result.staged / "report.md").read_text()
+
+    typer.echo(asyncio.run(run()))
+
+
+COMMANDS = {"ask", "expand", "run", "tool", "feedback", "eval", "report", "dream", "--help", "-h"}
 
 
 def main() -> None:

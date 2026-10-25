@@ -36,6 +36,14 @@ class Registry:
             raise KeyError(f"unknown tool {tool_name!r}")
         return tool, tool.op(op_name)
 
+    def summary_fields(self, ref: str) -> list[str]:
+        """The op's summary fields; none for something that is not a registry op (a script's
+        report)."""
+        try:
+            return self.resolve(ref)[1].returns.summary_fields
+        except KeyError:
+            return []
+
     def op_refs(self) -> list[str]:
         return [f"{t.name}.{op.name}" for t in self.tools.values() for op in t.ops]
 
@@ -142,7 +150,7 @@ def _load_one(path: Path, reg: Registry) -> Tool | None:
         reg.problems.append(f"{path.name}: name {tool.name!r} does not match the file name")
         return None
     tool = _read_only_part(tool, path, reg)
-    if tool is not None and (problem := _refusal(tool)):
+    if tool is not None and (problem := refusal(tool)):
         reg.problems.append(f"{path.name}: {problem}")
         return None
     return tool
@@ -162,11 +170,17 @@ def _read_only_part(tool: Tool, path: Path, reg: Registry) -> Tool | None:
     return tool.model_copy(update={"ops": kept}) if kept else None
 
 
-def _refusal(tool: Tool) -> str | None:
-    """An op declared read-only whose command says otherwise: never load the tool."""
-    unsafe = {op.name: p for op in tool.ops if (p := op_problem(op.argv, op.mcp_tool, op.params))}
+def refusal(tool: Tool) -> str | None:
+    """An op declared read-only whose command says otherwise: never load the tool. Ingestion
+    applies the same check before it activates a staged manifest."""
+    unsafe = {op.name: p for op in tool.ops if (p := op_problem(op.argv, _named(op), op.params))}
     # declared read-only, but the argv says otherwise: never load it
     return f"refused, {unsafe}" if unsafe else None
+
+
+def _named(op: Op) -> str | None:
+    """The name a non-CLI op runs by: its MCP tool, or its workflow function."""
+    return op.mcp_tool or (op.entry.rsplit(":", 1)[-1] if op.entry else None)
 
 
 def _check_references(reg: Registry, loaded: list[Tool]) -> None:

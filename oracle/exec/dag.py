@@ -27,10 +27,29 @@ class StepRun:
     round: int = 0  # 0 for the first plan, n for replan n
     same_as: str | None = None
     """Set when an identical (op, params) already ran in this call; the result is reused."""
+    hop: int = 0
+    """Crawl hop (0 outside a crawl)."""
+    parent: str | None = None
+    """The term or pointer that led to this step, in a crawl."""
+    why: str | None = None
+    """What that term is, as the crawl's extractor described it ("author of the runbook")."""
+    relevance: float | None = None
+    """How much the extractor thought looking the term up would add (0 to 1)."""
+
+    def followed(self) -> str:
+        """How a crawl reached this result, for a summary: `followed "X" (why)`, or ""."""
+        if not self.parent:
+            return ""
+        return f'followed "{self.parent}"' + (f" ({self.why})" if self.why else "")
 
     @property
     def op(self) -> str:
         return self.result.op
+
+    @property
+    def found(self) -> bool:
+        """Returned results of its own (not a reuse of an identical lookup)."""
+        return self.result.ok and bool(self.result.records) and not self.same_as
 
     @property
     def ran(self) -> bool:
@@ -47,10 +66,17 @@ class PlanRunner:
     runs: dict[str, StepRun] = field(default_factory=dict)
     aliases: dict[str, list[str]] = field(default_factory=dict)
     recipes_used: list[str] = field(default_factory=list)
-    _by_call: dict[str, tuple[str, asyncio.Task[OpResult]]] = field(default_factory=dict)
+    _by_call: dict[str, tuple[str | None, "asyncio.Future[OpResult]"]] = field(default_factory=dict)
+    """(op, params) -> (the step that owns the lookup, or None once its caller was
+    cancelled; the lookup)."""
 
     async def run(self, steps: list[Step], round_: int = 0) -> list[StepRun]:
         return await self._waves(steps, lambda s: self._node(s, round_))
+
+    async def run_literal(self, step: Step) -> StepRun:
+        """One op whose params are values, never bindings (a script's call: `$5xx` is a
+        query, not a reference to step 5xx)."""
+        return await self._op(step, None, 0, literal=True)
 
     def results_of(self, step_id: str) -> list[OpResult]:
         ids = self.aliases.get(step_id, [step_id])
@@ -124,26 +150,56 @@ class PlanRunner:
     async def _one(self, step: Step, recipe: str, round_: int) -> list[StepRun]:
         return [await self._op(step, recipe, round_)]
 
-    async def _op(self, step: Step, recipe: str | None, round_: int) -> StepRun:
+    async def _op(
+        self, step: Step, recipe: str | None, round_: int, literal: bool = False
+    ) -> StepRun:
         if step.op.partition(".")[0] not in self.registry.tools:
             return self._settle(step, "unavailable", "not registered here", recipe, round_)
         try:
-            params, missing = self._bind(step.params)
+            params, missing = (dict(step.params), set()) if literal else self._bind(step.params)
         except BindingError as exc:
             return self._settle(step, "invalid", str(exc), recipe, round_)
         if missing:
             reason = f"needs results from {', '.join(sorted(missing))}, which returned none"
             return self._settle(step, "skipped", reason, recipe, round_)
         key = step.op + json.dumps(params, sort_keys=True, default=str)
-        if key in self._by_call:  # the same lookup again, even in the same wave: run it once
-            first, task = self._by_call[key]
-            run = StepRun(step.id, await task, recipe, round_, same_as=first)
+        first, task = self._by_call.get(key, (None, None))
+        if task is not None and first is not None:  # the same lookup again: run it once
+            result, same_as = await self._reuse(key, step, task)
+            run = StepRun(step.id, result, recipe, round_, same_as=same_as)
         else:
-            task = asyncio.ensure_future(self.executor.run(step.op, params))
-            self._by_call[key] = (step.id, task)
-            run = StepRun(step.id, await task, recipe, round_)
+            run = StepRun(step.id, await self._own(key, step, params, task), recipe, round_)
         self.runs[step.id] = run
         return run
+
+    async def _reuse(
+        self, key: str, step: Step, task: "asyncio.Future[OpResult]"
+    ) -> tuple[OpResult, str | None]:
+        """(the shared result, the step it reuses), or no step when the first caller was
+        cancelled while this one waited: then this step owns the result."""
+        result = await asyncio.shield(task)
+        owner = self._by_call[key][0]
+        if owner is None:
+            self._by_call[key] = (step.id, task)
+        return result, owner
+
+    async def _own(
+        self,
+        key: str,
+        step: Step,
+        params: dict[str, Any],
+        task: "asyncio.Future[OpResult] | None",
+    ) -> OpResult:
+        """Run the lookup as its first caller. Shielded: a caller that is cancelled (a failed
+        script attempt) leaves the lookup running, and the next caller of the same lookup owns
+        its result, so it is logged once, under a step that finished."""
+        task = task or asyncio.ensure_future(self.executor.run(step.op, params))
+        self._by_call[key] = (step.id, task)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._by_call[key] = (None, task)
+            raise
 
     def _bind(self, params: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
         out, missing = {}, set()

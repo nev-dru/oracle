@@ -50,26 +50,24 @@ def digest(
     """One block per step: header, then `pointer | summary [| slice]` lines."""
     lines = [DATA_OPEN]
     for run in runs:
-        r = run.result
-        head = f"[{run.step_id}] {r.op} -> {r.status}"
-        if not r.ok:
-            lines.append(f"{head}: {defang(r.error or '')}")
-            continue
-        lines.append(f"{head}, {len(r.records)} results" + (" (truncated)" if r.truncated else ""))
-        fields = _fields(registry, r.op)
-        for record, pointer in list(zip(r.records, r.pointers, strict=True))[:per_step]:
-            line = f"  {pointer} | {summary_of(record, fields)}"
-            extra = slice_of(record, fields, slice_chars) if slice_chars else ""
-            lines.append(line + (f" | {extra}" if extra else ""))
-        if len(r.records) > per_step:
-            lines.append(f"  … {len(r.records) - per_step} more")
+        lines += _block(run, registry, per_step, slice_chars)
     lines.append(DATA_CLOSE)
     text = "\n".join(lines)
     return text if len(text) <= budget_chars else text[:budget_chars] + "\n…(cut)\n" + DATA_CLOSE
 
 
-def _fields(registry: Registry, ref: str) -> list[str]:
-    try:
-        return registry.resolve(ref)[1].returns.summary_fields
-    except KeyError:
-        return []
+def _block(run: StepRun, registry: Registry, per_step: int, slice_chars: int) -> list[str]:
+    r = run.result
+    head = f"[{run.step_id}] {r.op} -> {r.status}"
+    if not r.ok:
+        return [f"{head}: {defang(r.error or '')}"]
+    head += f", {len(r.records)} results" + (" (truncated)" if r.truncated else "")
+    lines = [head + (f", {defang(run.followed())}" if run.parent else "")]
+    fields = registry.summary_fields(r.op)
+    for record, pointer in list(zip(r.records, r.pointers, strict=True))[:per_step]:
+        line = f"  {pointer} | {summary_of(record, fields)}"
+        extra = slice_of(record, fields, slice_chars) if slice_chars else ""
+        lines.append(line + (f" | {extra}" if extra else ""))
+    if len(r.records) > per_step:
+        lines.append(f"  … {len(r.records) - per_step} more")
+    return lines

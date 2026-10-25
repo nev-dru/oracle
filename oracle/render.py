@@ -50,6 +50,15 @@ class Answer:
     scored: list[str] = field(default_factory=list)
     """Shortlisted tools the ranker actually matched (not padding)."""
     skipped: list[str] = field(default_factory=list)
+    hops: int = 0
+    """Deep crawl: hops of searching run, the first plan included (0 outside a crawl)."""
+    terms_searched: int = 0
+    unexpanded: list[str] = field(default_factory=list)
+    """Deep crawl: terms found but not searched, with why (budget, depth, no op)."""
+    stopped: str | None = None
+    cost: str | None = None
+    script: str | None = None
+    """Deep script: the code that ran (the last attempt)."""
     step_results: list[dict[str, Any]] = field(default_factory=list)
     """One row per step that was attempted: step, op, status, n results. For evals and logs."""
     tokens_in: int = 0
@@ -65,7 +74,7 @@ def findings_from(runs: list[StepRun], registry: Registry) -> list[Finding]:
         r = run.result
         if not r.ok:
             continue
-        fields = registry.resolve(r.op)[1].returns.summary_fields
+        fields = registry.summary_fields(r.op)
         for record, pointer in zip(r.records, r.pointers, strict=True):
             out.append(Finding(summarise(record, fields, pointer), pointer, r.op))
     return out
@@ -118,7 +127,7 @@ def to_markdown(a: Answer) -> str:
     lines = ["## Findings", *_findings_md(a), "", "## Coverage", *_coverage_md(a)]
     if a.refine:
         lines += ["", "## Refine", *a.refine]
-    lines += ["", "## Trace", *a.trace, *a.notes]
+    lines += ["", "## Trace", *a.trace, *a.notes, *([a.cost] if a.cost else [])]
     lines.append(f"call_id {a.call_id}  session {a.session}  level {a.level}")
     return "\n".join(lines)
 
@@ -150,15 +159,26 @@ def _coverage_md(a: Answer) -> list[str]:
         lines.append(f"Not available here: {', '.join(a.unavailable)}")
     if a.skipped:
         lines.append(f"Skipped: {'; '.join(a.skipped)}")
+    lines += _crawl_md(a)
     lines += [f"Failed: {f}" for f in a.failures]
     lines.append(f"Confidence: {a.confidence}   Gaps: {'; '.join(a.gaps) or 'none found'}")
+    return lines
+
+
+def _crawl_md(a: Answer) -> list[str]:
+    if not a.hops:
+        return []
+    lines = [f"Crawl: {a.hops} hops, {a.terms_searched} terms searched, stopped: {a.stopped}"]
+    if a.unexpanded:
+        more = f" (+{len(a.unexpanded) - 10} more)" if len(a.unexpanded) > 10 else ""
+        lines.append(f"Not expanded: {', '.join(a.unexpanded[:10])}{more}")
     return lines
 
 
 def to_json(a: Answer) -> str:
     """The same contract as markdown, for the MCP wrapper; run details sit under `meta`."""
     meta = ("ops_run", "recipes", "replans", "shortlist", "scored", "tokens_in", "tokens_out",
-            "model_calls", "wall_ms", "breadth", "time_window", "step_results")  # fmt: skip
+            "model_calls", "wall_ms", "breadth", "time_window", "step_results", "cost")  # fmt: skip
     data = {
         "call_id": a.call_id,
         "session": a.session,
@@ -171,6 +191,14 @@ def to_json(a: Answer) -> str:
             "no_match": a.no_match,
             "unavailable": a.unavailable,
             "skipped": a.skipped,
+            "crawl": {
+                "hops": a.hops,
+                "terms_searched": a.terms_searched,
+                "unexpanded": a.unexpanded,
+                "stopped": a.stopped,
+            }
+            if a.hops
+            else None,
             "failures": a.failures,
             "confidence": a.confidence,
             "gaps": a.gaps,

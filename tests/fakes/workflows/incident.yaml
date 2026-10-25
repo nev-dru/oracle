@@ -1,0 +1,39 @@
+name: incident
+kind: workflow
+description: Incident timeline for one service from Kubernetes, Argo CD, logs and Jira in one call.
+when: Something broke for a service and the user wants the timeline and likely cause.
+ops:
+- name: investigate
+  when: Gather warnings, deploys, error logs and open tickets that mention one service.
+  entry: oracle_workflows.incident:investigate
+  params:
+    service: {type: str, required: true, desc: "service or app name, e.g. billing-api"}
+  returns: {format: json, path: "$[*]", pointer: "{pointer}", summary_fields: [source, text]}
+  budget: {model_calls: 0, wall_s: 30}
+  examples:
+  - params: {service: billing-api}
+    expect: {min_results: 1}
+- name: again
+  when: Test only; calls itself.
+  entry: oracle_workflows.incident:again
+  params:
+    service: {type: str, required: true}
+  returns: {format: json, path: "$[*]", pointer: "{pointer}"}
+- name: nested
+  when: Test only; asks the oracle.
+  entry: oracle_workflows.incident:nested
+  params:
+    question: {type: str, required: true}
+    level: {type: str}
+  returns: {format: json, path: "$[*]", pointer: "{pointer}"}
+- name: nested_scoped
+  when: Test only; asks the oracle within a scope.
+  entry: oracle_workflows.incident:nested_scoped
+  params:
+    question: {type: str, required: true}
+    scope: {type: "list[str]"}
+  returns: {format: json, path: "$[*]", pointer: "{pointer}"}
+- name: broken
+  when: Test only; fails.
+  entry: oracle_workflows.incident:broken
+  returns: {format: json, path: "$[*]", pointer: "{pointer}"}

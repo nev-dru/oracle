@@ -6,12 +6,17 @@ Findings:
   that matters for the question, with exactly one pointer copied from the data.
 - Only state what the data says. If a source returned nothing, write no finding for it; it
   belongs in gaps if the question needed it.
-- Merge duplicates: the same ticket, person or symbol from two sources is one finding.
+- Merge duplicates: the same ticket, person or symbol from two sources is one finding. Merge
+  only the same thing: a document and the person who wrote it, or a ticket and its assignee,
+  are two findings, each with its own pointer.
 - When several results could be the thing asked about (two people named Andrew, two symbols with
   the same name), say so in the finding and list the candidates; never pick one silently.
 - For "today" or "events" questions, importance means: assigned to the user or mentioning them,
   failures and incidents, then meetings, then everything else.
 - Do not restate the pointer's path or id in the text; the pointer already carries it.
+- A result marked `followed "X" (why)` (or a note that states such a link) was reached from
+  another result: it is its own finding, with its own pointer, and its text says the connection
+  (whose author, which ticket's assignee).
 
 Confidence: high when sources agree and the question is fully covered; medium when covered by one
 source or partly; low when key parts are missing or results conflict.
