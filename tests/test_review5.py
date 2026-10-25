@@ -24,6 +24,7 @@ from oracle.registry.loader import Registry
 from oracle.registry.schema import Tool
 from oracle.render import findings_from
 from oracle.workflows.protocol import GuardError, Trace, WorkflowBudget, enter_ask
+from oracle.workflows.runner import OracleClient, WorkflowHost
 from tests.conftest import DONE, echo_distiller, plan, scripted
 from tests.test_workflows import executor, wf_cfg, wf_registry  # noqa: F401 (fixtures)
 
@@ -184,6 +185,30 @@ def test_the_workflow_budget_reserves_before_calls_start() -> None:
     budget.settle(second, 3)
     assert budget.used == 5 and budget.reserved == 0
     assert budget.reserve("quick") == 1
+
+
+async def test_a_nested_script_reserves_the_tier_it_runs_at(
+    wf_cfg: Config,  # noqa: F811
+    wf_registry: Registry,  # noqa: F811
+) -> None:
+    """Under a deep parent, --script raises a nested call from standard to deep, so it reserves
+    a deep call's 12, not standard's 4: three gathered could spend 36 under a cap of 12."""
+    host = WorkflowHost(wf_cfg, wf_registry, Trace.root("deep").enter("oracle", "ask", "outer"))
+    client = OracleClient(host, WorkflowBudget(model_calls=11))
+    with pytest.raises(GuardError, match="a deep call needs about 12"):
+        await client.ask("what is going on", script=True)
+    assert client.budget.reserved == 0
+
+
+async def test_a_bad_nested_request_reserves_nothing(
+    wf_cfg: Config,  # noqa: F811
+    wf_registry: Registry,  # noqa: F811
+) -> None:
+    host = WorkflowHost(wf_cfg, wf_registry, Trace.root("deep"))
+    client = OracleClient(host, WorkflowBudget(model_calls=8))
+    with pytest.raises(TypeError):
+        await client.ask("what is going on", scopes=["acli"])  # a typo for scope
+    assert client.budget.reserved == 0
 
 
 async def test_a_bug_in_a_workflow_is_an_error(wf_cfg: Config, wf_registry: Registry) -> None:  # noqa: F811

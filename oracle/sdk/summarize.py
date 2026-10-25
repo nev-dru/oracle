@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.models import Model
 
-from oracle.budget import Budget
+from oracle.budget import Budget, Interrupted
 from oracle.exec.dag import StepRun
 from oracle.plan.digest import (
     DATA_CLOSE,
@@ -136,13 +136,22 @@ async def _map(question: str, lines: list[Line], model: Model | str, budget: Bud
 
     batches = [lines[i : i + MAP_BATCH] for i in range(0, len(lines), MAP_BATCH)]
     notes = await asyncio.gather(*(one(b) for b in batches), return_exceptions=True)
-    if notes and all(isinstance(n, BaseException) for n in notes):
-        raise next(n for n in notes if isinstance(n, BaseException))
+    if (failure := _all_failed(notes)) is not None:
+        raise failure
     out: list[Item] = []
     for batch, group in zip(batches, notes, strict=True):
         # a batch whose map call failed goes to the merge as its lines, unshortened
         out += _unmapped(batch) if isinstance(group, BaseException) else group
     return out
+
+
+def _all_failed(notes: list[list[Item] | BaseException]) -> BaseException | None:
+    """When every batch failed: a Ctrl-C among them if any (so the deep summary reruns), else
+    the first failure."""
+    failed = [n for n in notes if isinstance(n, BaseException)]
+    if not notes or len(failed) < len(notes):
+        return None
+    return next((n for n in failed if isinstance(n, Interrupted)), failed[0])
 
 
 def _unmapped(batch: list[Line]) -> list[Item]:

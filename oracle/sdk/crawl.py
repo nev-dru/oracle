@@ -81,19 +81,8 @@ class Crawler:
         return None
 
     async def _hop(self, out: CrawlOutcome, new: list[StepRun]) -> list[StepRun] | None:
-        terms = await extract_terms(
-            self.extractor,
-            question=self.question,
-            runs=new,
-            seen=self.seen,
-            registry=self.registry,
-            budget=self.budget,
-        )
-        self.seen |= {key(t.value) for t in terms}
-        admitted, rest = self._admit(terms)
-        out.unexpanded += [f"{t.value} (budget)" for t in rest]
+        admitted = await self._terms(out, new)
         if not admitted:
-            out.stopped = "budget" if rest else "no new terms"
             return None
         hop = out.hops + 1
         query = " ".join([self.question, *(t.description for t in admitted)])
@@ -107,6 +96,8 @@ class Crawler:
             earlier=self.step_ids,
             budget=self.budget,
         )
+        if self._interrupted(out, admitted):
+            return None
         searched = _searched(out, admitted, plan)
         if not plan.steps:
             out.stopped = "no searchable terms"
@@ -115,6 +106,35 @@ class Crawler:
         out.hops = hop  # only once the hop's runs are in hand, so the count never runs ahead
         out.searched += [t.value for t in searched]
         return runs
+
+    async def _terms(self, out: CrawlOutcome, new: list[StepRun]) -> list[Term]:
+        """The terms this hop searches: extracted from its new results, then admitted. None
+        admitted means the crawl stops here, and `out` says why."""
+        terms = await extract_terms(
+            self.extractor,
+            question=self.question,
+            runs=new,
+            seen=self.seen,
+            registry=self.registry,
+            budget=self.budget,
+        )
+        self.seen |= {key(t.value) for t in terms}
+        if self._interrupted(out, terms):
+            return []
+        admitted, rest = self._admit(terms)
+        out.unexpanded += [f"{t.value} (budget)" for t in rest]
+        if not admitted:
+            out.stopped = "budget" if rest else "no new terms"
+        return admitted
+
+    def _interrupted(self, out: CrawlOutcome, terms: list[Term]) -> bool:
+        """The first Ctrl-C landed during this hop's model call without killing it (a Bedrock
+        call, or a process that finished first): start nothing more, and keep the terms."""
+        if not self.budget.stopping():
+            return False
+        out.unexpanded += [f"{t.value} (interrupted)" for t in terms]
+        out.stopped = "interrupted"
+        return True
 
     def _admit(self, terms: list[Term]) -> tuple[list[Term], list[Term]]:
         """Every term the budget can afford, best first; with an unlimited budget, all of them."""

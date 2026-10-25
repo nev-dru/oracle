@@ -75,8 +75,13 @@ class Budget:
     usage: Usage = field(default_factory=Usage)
     tool_calls: int = 0
     clock: Callable[[], float] = time.monotonic
-    """A test passes its own clock, and `started` on that clock."""
-    started: float = field(default_factory=time.monotonic)
+    """A test passes its own clock."""
+    started: float | None = None
+    """On `clock`; None is now."""
+
+    def __post_init__(self) -> None:
+        if self.started is None:
+            self.started = self.clock()
 
     @classmethod
     def for_tier(
@@ -124,6 +129,7 @@ class Budget:
         return self.stop is not None and self.stop.is_set()
 
     def elapsed(self) -> float:
+        assert self.started is not None  # set in __post_init__
         return self.clock() - self.started
 
     def out_of_time(self) -> bool:

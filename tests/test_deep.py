@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from oracle.ask import AskRequest, Models, ask
-from oracle.budget import Budget
+from oracle.budget import Budget, Interrupted
 from oracle.config import Config
 from oracle.exec.dag import StepRun
 from oracle.exec.executor import OpResult
@@ -181,6 +181,55 @@ async def test_a_ctrl_c_that_kills_a_model_call_is_the_stop(
     assert answer.cost and " 2 searches" in answer.cost  # the first plan's search counts
 
 
+async def test_no_hop_is_planned_after_a_ctrl_c_its_extract_survived(
+    home_cfg: Config, fake_registry: Registry
+) -> None:
+    """A Ctrl-C that lands while a model call runs but does not kill it (a Bedrock call) still
+    stops the crawl there: the terms it found are reported, and no hop is planned for them."""
+    stop = asyncio.Event()
+    chain, hops = extractor(), hop_planner()
+    extracts: list[int] = []
+    planned: list[str] = []
+
+    def extract(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        extracts.append(1)
+        if len(extracts) == 2:  # the extract for hop 3, as the user presses Ctrl-C
+            stop.set()
+        return chain.function(messages, info)  # type: ignore[misc]
+
+    def plan_hop(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        planned.append(prompt_text(messages))
+        return hops.function(messages, info)  # type: ignore[misc]
+
+    req = AskRequest("what is going on with the ingestion gateway 5xx errors", level="deep")
+    models = deep_models(extractor=FunctionModel(extract), planner=FunctionModel(plan_hop))
+    answer = await ask(req, home_cfg, fake_registry, models, stop=stop)
+    assert answer.stopped == "interrupted" and answer.hops == 2 and answer.findings
+    assert answer.unexpanded == ["ingestion gateway 5xx runbook (interrupted)"]
+    assert sum("Terms to look up:" in p for p in planned) == 1  # hop 2's plan only
+    assert "acli.confluence.search" not in answer.ops_run
+
+
+async def test_no_hop_runs_after_a_ctrl_c_its_plan_survived(
+    home_cfg: Config, fake_registry: Registry
+) -> None:
+    stop = asyncio.Event()
+    hops = hop_planner()
+
+    def plan_hop(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        text = prompt_text(messages)
+        if "Terms to look up:" in text and "- OPS-1206:" in text:
+            stop.set()  # the Ctrl-C lands while hop 2 is planned
+        return hops.function(messages, info)  # type: ignore[misc]
+
+    req = AskRequest("what is going on with the ingestion gateway 5xx errors", level="deep")
+    models = deep_models(planner=FunctionModel(plan_hop))
+    answer = await ask(req, home_cfg, fake_registry, models, stop=stop)
+    assert answer.stopped == "interrupted" and answer.hops == 1
+    assert answer.unexpanded == ["OPS-1206 (interrupted)"]
+    assert "acli.jira.get" not in answer.ops_run
+
+
 async def test_hop_steps_must_name_a_given_term(home_cfg: Config, fake_registry: Registry) -> None:
     """A hop step for a term nobody extracted (text planted in a page) is refused."""
 
@@ -255,6 +304,29 @@ async def test_a_failed_map_batch_still_reaches_the_merge(fake_registry: Registr
     )  # fmt: skip
     merged = seen[0]
     assert "jira:P-19 " in merged and "jira:P-20 | acli.jira.search: a fact" in merged
+
+
+async def test_a_map_the_ctrl_c_killed_is_interrupted(fake_registry: Registry) -> None:
+    """Every map batch failed: one for its own reasons first, then the rest to a Ctrl-C. The
+    summary says it was interrupted, so the deep tier summarises once more."""
+    stop = asyncio.Event()
+
+    async def mapper(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if "jira:P-0 " in prompt_text(messages):
+            raise RuntimeError("bad output")
+        await asyncio.sleep(0.01)
+        stop.set()
+        raise RuntimeError("claude exited with -2")
+
+    result = OpResult(op="acli.jira.search", params={})
+    result.records = [{"key": f"P-{i}", "summary": "s"} for i in range(30)]
+    result.pointers = [f"jira:P-{i}" for i in range(30)]
+    with pytest.raises(Interrupted):
+        await summarize(
+            question="q", interpretation="i", when="now", breadth=False, gaps=[],
+            runs=[StepRun("s1", result)], registry=fake_registry,
+            mapper=FunctionModel(mapper), reducer=echo_distiller(), budget=Budget(stop=stop),
+        )  # fmt: skip
 
 
 async def test_claude_code_processes_are_capped(monkeypatch: pytest.MonkeyPatch) -> None:

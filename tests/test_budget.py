@@ -86,7 +86,7 @@ def test_tokens_count_only_at_deep() -> None:
 )
 def test_time_bounds_read_one_clock(level: str, at: float, out_of_time: bool, late: bool) -> None:
     clock = Clock()
-    budget = Budget(bounds=BOUNDS[level], clock=clock, started=0.0)
+    budget = Budget(bounds=BOUNDS[level], clock=clock)  # starts on its clock
     clock.now = at
     assert budget.out_of_time() is out_of_time and budget.late_for_summary() is late
     assert budget.line().endswith(f"{at:.0f} s")

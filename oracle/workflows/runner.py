@@ -121,10 +121,10 @@ class OracleClient:
         from oracle.ask import AskRequest, ask  # the full pipeline, only when a workflow asks
 
         entry = enter_ask(self.host.current(), question, level, bool(request.get("script")))
-        reserved = self.budget.reserve(entry.asked)
+        req = AskRequest(question, **{**request, "level": entry.level, "script": entry.script})
+        reserved = self.budget.reserve(entry.level)  # the tier it runs at, after --script
         if entry.clamped:
             self.notes.append(entry.clamped)
-        req = AskRequest(question, **{**request, "level": entry.level, "script": entry.script})
         actual = reserved
         try:
             answer = await ask(
