@@ -1,12 +1,22 @@
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from oracle import cli
 from oracle.ask import Models
 from oracle.config import REPO_ROOT, Config
-from oracle.evals import CLAUSES, clause_failures, judge, load_cases, ranker_hit, run_case
+from oracle.evals import (
+    CLAUSES,
+    NO_PROFILE,
+    clause_failures,
+    judge,
+    load_cases,
+    ranker_hit,
+    run_case,
+)
 from oracle.registry.loader import Registry
 from oracle.render import Answer, Finding
 from tests.conftest import DONE, echo_distiller, plan, scripted
@@ -41,8 +51,43 @@ def answer(**over: object) -> Answer:
 
 
 def test_every_golden_clause_has_a_checker() -> None:
-    for case in load_cases(REPO_ROOT / "golden.yaml"):
-        assert set(case["expect"]) <= set(CLAUSES), case["id"]
+    golden = REPO_ROOT / "golden.yaml"
+    named = {p for c in yaml.safe_load(golden.read_text())["cases"] for p in c.get("profiles", {})}
+    for profile in named | {NO_PROFILE}:
+        for case in load_cases(golden, profile=profile):
+            assert set(case["expect"]) <= set(CLAUSES), (profile, case["id"])
+
+
+def test_the_fixture_pointers_are_checked_at_home_only() -> None:
+    golden = REPO_ROOT / "golden.yaml"
+    home = {c["id"]: c for c in load_cases(golden, profile="home")}["crawl-gateway-5xx"]
+    work = {c["id"]: c for c in load_cases(golden)}["crawl-gateway-5xx"]
+    assert "jira:OPS-1206" in home["expect"]["pointers"] and "Priya" in home["judge"]
+    assert "pointers" not in work["expect"] and "Priya" not in work["judge"]
+    assert work["unset_profile"] == NO_PROFILE and "unset_profile" not in home
+
+
+def golden_with(tmp_path: Path, **case: object) -> Path:
+    path = tmp_path / "golden.yaml"
+    base = {"id": "c", "query": "q", "expect": {"findings_min": 1}, "judge": "shared"}
+    path.write_text(yaml.safe_dump({"cases": [{**base, **case}]}))
+    return path
+
+
+def test_a_profile_block_adds_its_clauses_and_replaces_the_rubric(tmp_path: Path) -> None:
+    block = {"expect": {"pointers": ["jira:P-1"]}, "judge": "home rubric"}
+    golden = golden_with(tmp_path, profiles={"home": block})
+    (case,) = load_cases(golden, profile="home")
+    assert case["expect"] == {"findings_min": 1, "pointers": ["jira:P-1"]}
+    assert case["judge"] == "home rubric"
+    (bare,) = load_cases(golden_with(tmp_path, profiles={"home": {"expect": {}}}), profile="home")
+    assert bare["judge"] == "shared"
+
+
+def test_a_typo_in_a_profile_block_is_refused(tmp_path: Path) -> None:
+    golden = golden_with(tmp_path, profiles={"home": {"pointers": ["jira:P-1"]}})
+    with pytest.raises(ValueError, match=r"profiles\.home has \['pointers'\]"):
+        load_cases(golden, profile="other")
 
 
 def test_clauses_pass_on_a_matching_answer(fake_registry: Registry) -> None:
@@ -113,7 +158,7 @@ def test_ranker_hit_counts_scored_registered_tools_not_padding(fake_registry: Re
 
 
 async def test_judge_and_case_run_with_scripted_models(
-    home_cfg: Config, fake_registry: Registry
+    home_cfg: Config, fake_registry: Registry, tmp_path: Path
 ) -> None:
     verdict = await judge(scripted({"verdict": "pass", "reason": "ok"}), "q", "r", "answer")
     assert verdict.verdict == "pass"
@@ -138,6 +183,13 @@ async def test_judge_and_case_run_with_scripted_models(
     passing = await run_case(case, home_cfg, fake_registry, models, None)
     assert passing.passed, passing.failures
     assert passing.ranker_hit
+    home_only = golden_with(tmp_path, **case, profiles={"home": {"expect": {}}})
+    (at_work,) = load_cases(home_only)
+    unset = await run_case(at_work, home_cfg, fake_registry, models, None)
+    assert unset.failures == [
+        "profiles: no 'default' block, so this profile's data checks are unset"
+    ]
+    assert unset.answer, "the answer is kept, to write the profile's pointers from"
 
 
 def test_feedback_cli_records_and_rejects_unknown_calls(home_cfg: Config, monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -57,5 +57,9 @@ cases:
     expect:
       crawl_hops_min: 3
       findings_min: 3
-      pointers: ["jira:OPS-1206", "conf:90011", "people:u-1003"]
-    judge: "Findings cover the open ticket, the gateway runbook and who wrote it (Priya Raman, her role), each with a pointer; Coverage lists the crawl's hops; nothing is invented."
+    judge: "Findings cover the open ticket, the gateway runbook and who wrote it (their role), each with a pointer; Coverage lists the crawl's hops; nothing is invented."
+    profiles:
+      home:
+        expect:
+          pointers: ["jira:OPS-1206", "conf:90011", "people:u-1003"]
+        judge: "Findings cover the open ticket, the gateway runbook and who wrote it (Priya Raman, her role), each with a pointer; Coverage lists the crawl's hops; nothing is invented."

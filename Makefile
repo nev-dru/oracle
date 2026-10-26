@@ -1,4 +1,4 @@
-.PHONY: build lint test fixtures gate-m1 gate-m2 gate-m3 gate-m4
+.PHONY: build lint test fixtures gate-m1 gate-m2 gate-m3 gate-m4 accept
 
 PY := oracle tests
 FIXTURE_REPO := $(CURDIR)/tests/fakes/acme
@@ -51,3 +51,11 @@ gate-m4: fixtures test
 	ORACLE_PROFILE=home uv run --all-extras oracle tool test
 	ORACLE_PROFILE=home uv run --all-extras oracle tool test --ranker
 	ORACLE_PROFILE=home uv run --all-extras oracle eval
+
+# Acceptance on the active registry, for the work laptop: no ORACLE_PROFILE, so registry/tools/
+# and golden.yaml's `profiles.default` blocks. The gates above run the home profile only. Spends
+# model calls (see gate-m2).
+accept: test
+	uv run --all-extras oracle tool test
+	uv run --all-extras oracle tool test --ranker
+	uv run --all-extras oracle eval

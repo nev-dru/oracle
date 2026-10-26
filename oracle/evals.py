@@ -169,9 +169,35 @@ class CaseResult:
     """The rendered answer, kept in eval/last.json so a failure can be read without a rerun."""
 
 
-def load_cases(golden: Path, only: list[str] | None = None) -> list[dict[str, Any]]:
+NO_PROFILE = "default"
+"""The golden.yaml profile block a run without ORACLE_PROFILE reads: the work registry."""
+
+PROFILE_KEYS = {"expect", "judge"}
+
+
+def load_cases(
+    golden: Path, only: list[str] | None = None, profile: str = NO_PROFILE
+) -> list[dict[str, Any]]:
+    """Each case as `profile` runs it. A case's `profiles` block holds the checks that depend on
+    one profile's data (the home fixtures' pointers): its `expect` clauses join the shared ones
+    and its `judge` replaces the shared rubric. A case with blocks for other profiles but none
+    for this one runs on its shared checks and fails, so a data check is never dropped."""
     cases = (yaml.safe_load(golden.read_text()) or {}).get("cases", [])
-    return [c for c in cases if not only or c["id"] in only]
+    return [_for_profile(c, profile) for c in cases if not only or c["id"] in only]
+
+
+def _for_profile(case: dict[str, Any], profile: str) -> dict[str, Any]:
+    blocks = case.get("profiles") or {}
+    for name, block in blocks.items():
+        if unknown := sorted(set(block) - PROFILE_KEYS):
+            allowed = sorted(PROFILE_KEYS)
+            raise ValueError(f"{case['id']}: profiles.{name} has {unknown}, not only {allowed}")
+    if not blocks:
+        return case
+    if (block := blocks.get(profile)) is None:
+        return {**case, "unset_profile": profile}
+    expect = {**case.get("expect", {}), **block.get("expect", {})}
+    return {**case, "expect": expect, "judge": block.get("judge", case.get("judge"))}
 
 
 def ranker_hit(case: dict[str, Any], answer: Answer, registry: Registry) -> bool:
@@ -199,6 +225,8 @@ async def run_case(
     )
     answer = await ask(req, cfg, registry, Models(models.planner, models.checker, models.distiller))
     failures = clause_failures(case.get("expect", {}), answer, registry)
+    if name := case.get("unset_profile"):
+        failures.append(f"profiles: no {name!r} block, so this profile's data checks are unset")
     judged = None
     if judge_model is not None and case.get("judge"):
         verdict = await judge(judge_model, case["query"], case["judge"], to_markdown(answer))

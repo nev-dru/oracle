@@ -339,13 +339,11 @@ def eval_cmd(
 ) -> None:
     """Run golden.yaml at each case's level; exit 1 if any case fails. Spends model calls."""
     from oracle.ask import Models
-    from oracle.evals import last_run, load_cases, report, run_case, save_run
+    from oracle.evals import last_run, report, run_case, save_run
     from oracle.llm.models import resolve_model
 
     cfg, registry = _setup()
-    cases = load_cases(REPO_ROOT / "golden.yaml", case)
-    if not cases:
-        _die(f"no golden cases match {case}")
+    cases = _golden_cases(cfg, case)
     try:
         judge_model = None if no_judge else resolve_model(cfg.model("planner"))
     except ConfigError as exc:
@@ -364,6 +362,20 @@ def eval_cmd(
     kept = [r for r in _previous_results(path) if r.get("id") not in {x.id for x in results}]
     save_run(path, results, kept)
     raise typer.Exit(0 if all(r.passed for r in results) else 1)
+
+
+def _golden_cases(cfg: Config, only: list[str] | None) -> list[dict[str, Any]]:
+    """golden.yaml's cases as the active profile runs them."""
+    from oracle.evals import NO_PROFILE, load_cases
+
+    profile = cfg.profile.name if cfg.profile else NO_PROFILE
+    try:
+        cases = load_cases(REPO_ROOT / "golden.yaml", only, profile)
+    except ValueError as exc:
+        _die(str(exc))
+    if not cases:
+        _die(f"no golden cases match {only}")
+    return cases
 
 
 def _previous_results(path: Path) -> list[dict[str, Any]]:
