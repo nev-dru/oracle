@@ -30,7 +30,7 @@ Manifests, recipes, real pointers and work queries are internal, and this clone 
 
 1. `git remote set-url --push origin DISABLED`, then `git remote -v`: the push URL must read `DISABLED`.
 2. `uv sync --all-extras`, then `make lint && make test`. Both must be green before anything else.
-3. Set the work models (DESIGN.md, "Tiers and model configuration"): `ORACLE_MODEL_PLANNER`, `ORACLE_MODEL_EXTRACT` and `ORACLE_MODEL_DEEP` as `openai:bedrock/...` strings, with `OPENAI_BASE_URL` pointing at the LiteLLM proxy. Leave `ORACLE_PROFILE` unset and set no `registry` in `~/.oracle/config.toml`, so the registry is `~/.oracle/registry/tools/`; `oracle tool list` prints it.
+3. Set the work models (DESIGN.md, "Tiers and model configuration"): `ORACLE_MODEL_PLANNER`, `ORACLE_MODEL_EXTRACT` and `ORACLE_MODEL_DEEP` as `openai:bedrock/...` strings, with `OPENAI_BASE_URL` pointing at the LiteLLM proxy. Leave `ORACLE_PROFILE` unset and set no `registry` in `~/.oracle/config.toml`, so the registry is `~/.oracle/registry/tools/`; `oracle tool list` prints it. Until the first `oracle tool activate` creates that directory, `oracle tool list` shows "registry directory … does not exist" and `oracle tool test` fails with "nothing was tested"; both are expected.
 4. With no tools registered, `oracle ask` reports a gap without calling a model, so the models are proven in phase 2, after the first tool is added.
 
 ## Phase 2: add the real tools and recipes (about half a day)
