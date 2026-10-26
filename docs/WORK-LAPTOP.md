@@ -6,7 +6,8 @@ Paste this into Claude Code at the repo root on the work laptop:
 
 ## Where things stand (2026-10-25)
 
-- M1 to M4 are built and `make gate-m4` is green at home: 308 tests, 26/26 manifest examples, ranker top-3 97%, golden 5/5, about 29K tokens and 25 s per case.
+- M1 to M4 are built and `make gate-m4` is green at home: 313 tests, 26/26 manifest examples, ranker top-3 97%, golden 7/7 (with the two name follow-up cases), about 29K tokens and 27 s per case, about 200K tokens in all.
+- Done at home before the move: golden checks per profile (`profiles.<name>`, and `make accept` for work), and manifests that record the tool's version for drift.
 - At home every work tool is a fake: acli and workiq are fake CLIs (`tests/fakes/bin/`), kubectl, argocd, es and mongo were added through `oracle tool add` against fakes, and code search runs over the acme fixture repo. The argv shapes in `profiles/home/tools/` are guesses.
 - `registry/tools/` is the work registry. It starts empty and is filled by `oracle tool add`, one real tool at a time. Never edit the home manifests to make work pass.
 
