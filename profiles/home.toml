@@ -2,8 +2,8 @@
 # Select with ORACLE_PROFILE=home or `profile = "home"` in ~/.oracle/config.toml.
 # Build the fixture indexes first: `make fixtures`.
 
-# Home manifests live with the profile, so registry/tools stays the work registry that
-# `oracle tool add` fills one tool at a time.
+# Home manifests live with the profile, so the work registry (~/.oracle/registry/tools by
+# default) is the one `oracle tool add` fills one tool at a time.
 registry = "home/tools"  # every manifest here is active; `oracle tool activate` adds to it
 path_prepend = ["../adapters/bin", "../tests/fakes/bin"]
 

@@ -90,6 +90,11 @@ def test_config_env_overrides_file_and_profile_paths(tmp_path: Path) -> None:
     assert env["VEX_DB"].endswith(".fixtures/vex.db") and "${" not in env["VEX_DB"]
 
 
+def test_without_a_profile_the_registry_lives_outside_the_repo(tmp_path: Path) -> None:
+    cfg = load_config({"ORACLE_HOME": str(tmp_path)})  # the work laptop: internal manifests
+    assert cfg.profile is None and cfg.registry_dir == tmp_path / "registry" / "tools"
+
+
 def test_unknown_profile_is_a_clear_error(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="not found"):
         load_config({"ORACLE_HOME": str(tmp_path), "ORACLE_PROFILE": "nowhere"})

@@ -1,22 +1,23 @@
 # Recipes to rebuild on the work laptop
 
-Recipes live beside the registry they call: `registry/recipes/*.yaml` for `registry/tools/`.
-This folder starts empty because a recipe names ops, and the work tools get their op names
-from `oracle tool add`. The four seeded recipes were written for the home tools in
-`profiles/home/recipes/`; rebuild each one here once the tools it calls are active.
+Recipes live beside the registry they call: on the work laptop, `~/.oracle/registry/recipes/`
+for `~/.oracle/registry/tools/`, outside the repo, because a recipe names internal ops. This
+folder holds only this guide; the work tools get their op names from `oracle tool add`. The four seeded recipes were written for the home tools in
+`profiles/home/recipes/`; rebuild each one there once the tools it calls are active.
 
 ## Order of work
 
 1. Add the tools with `oracle tool add` and `oracle tool activate` (see `docs/DESIGN.md`,
    "Tool ingestion workflow").
-2. Copy a recipe from `profiles/home/recipes/` into this folder.
+2. Copy a recipe from `profiles/home/recipes/` into `~/.oracle/registry/recipes/`.
 3. Rename each stage's `op` to the real ingested op, and fix its params to match that op.
 4. Run `oracle tool list`. A stage whose tool is missing shows as a note
    ("runs without ... not active here"); a wrong op or param is a problem. Fix every problem.
 5. Run `oracle eval`. All four golden cases use these recipes.
 
-Golden cases name ops directly (`golden.yaml`). Keep these names when ingesting, or update
-`golden.yaml` on purpose: `code-search.search`, `code-graph.find_symbol`, `code-graph.expand`,
+Golden cases name ops directly (`golden.yaml`). Keep these names when ingesting; a name that
+truly differs is changed in `golden.yaml` on the personal laptop, since nothing is pushed
+from work: `code-search.search`, `code-graph.find_symbol`, `code-graph.expand`,
 `code-graph.path_between`, `acli.jira.search`, `acli.confluence.search`,
 `workiq.people.lookup`, `workiq.teams.search`, `workiq.calendar.today`,
 `argocd.app.history`, `kubectl.events`.

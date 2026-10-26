@@ -9,7 +9,7 @@ from typing import Annotated, Any, NoReturn
 
 import typer
 
-from oracle.config import REPO_ROOT, Config, ConfigError, load_config
+from oracle.config import Config, ConfigError, load_config
 from oracle.exec.pointers import SpillError, expand_spill
 from oracle.exec.selftest import ExampleResult, golden_ops_missing, run_examples, version_drift
 from oracle.log.store import open_store
@@ -273,9 +273,9 @@ def tool_test(
     """Run every manifest example against the real tool. Exit 1 if any fails."""
     cfg, registry = _setup()
     if ranker:
-        from oracle.rank.eval import run_ranker_eval
+        from oracle.rank.eval import ranker_files, run_ranker_eval
 
-        report = run_ranker_eval(registry, REPO_ROOT / "ranker_eval.yaml")
+        report = run_ranker_eval(registry, ranker_files(cfg.home))
         typer.echo("\n".join(report.lines()))
         raise typer.Exit(0 if report.passed else 1)
     unknown = sorted(set(names or []) - set(registry.tools))
@@ -288,21 +288,19 @@ def tool_test(
     only = set(names) if names else None
     with call_scope(cfg, registry, Trace.root("deep")) as executor:  # workflow examples run too
         results = asyncio.run(run_examples(registry, executor, only))
-    drift = asyncio.run(version_drift(registry, cfg.tool_env(), only))
-    raise typer.Exit(1 if _report(results, registry, drift) else 0)
+    notes = asyncio.run(version_drift(registry, cfg.tool_env(), only))
+    if missing := golden_ops_missing(registry, _golden(cfg)):
+        notes.append(f"golden.yaml names ops this registry lacks: {', '.join(missing)}")
+    raise typer.Exit(1 if _report(results, registry, notes) else 0)
 
 
-def _report(results: list[ExampleResult], registry: Registry, drift: list[str]) -> int:
+def _report(results: list[ExampleResult], registry: Registry, notes: list[str]) -> int:
     """Print example results, manifest problems and notes; return the number of failures."""
     for r in sorted(results, key=lambda r: (r.op, r.index)):
         typer.echo(f"{'PASS' if r.ok else 'FAIL'}  {r.op}[{r.index}]  {r.detail}  ({r.ms} ms)")
     for problem in registry.problems:
         typer.echo(f"FAIL  manifest  {problem}")
-    notes = [*registry.notes, *drift]
-    missing = golden_ops_missing(registry, REPO_ROOT / "golden.yaml")
-    if missing:
-        notes.append(f"golden.yaml names ops this registry lacks: {', '.join(missing)}")
-    for note in notes:
+    for note in [*registry.notes, *notes]:
         typer.echo(f"note: {note}")
     passed = sum(r.ok for r in results)
     typer.echo(f"{passed}/{len(results)} examples passed")
@@ -366,13 +364,24 @@ def eval_cmd(
     raise typer.Exit(0 if all(r.passed for r in results) else 1)
 
 
+def _golden(cfg: Config) -> list[dict[str, Any]]:
+    """The golden cases: the repo's, with ORACLE_HOME's golden.yaml on top."""
+    from oracle.evals import golden_files, read_golden
+
+    try:
+        return read_golden(*golden_files(cfg.home))
+    except ValueError as exc:
+        _die(str(exc))
+
+
 def _golden_cases(cfg: Config, only: list[str] | None) -> list[dict[str, Any]]:
-    """golden.yaml's cases as the active profile runs them."""
-    from oracle.evals import NO_PROFILE, load_cases
+    """The golden cases as the active profile runs them."""
+    from oracle.evals import NO_PROFILE, golden_files, load_cases
 
     profile = cfg.profile.name if cfg.profile else NO_PROFILE
+    golden, overlay = golden_files(cfg.home)
     try:
-        cases = load_cases(REPO_ROOT / "golden.yaml", only, profile)
+        cases = load_cases(golden, only, profile, overlay)
     except ValueError as exc:
         _die(str(exc))
     if not cases:

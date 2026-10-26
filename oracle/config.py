@@ -4,7 +4,8 @@ Model names are never hard-coded: each role reads a PydanticAI model string from
 ORACLE_MODEL_<ROLE> or `[models]` in config.toml. A profile picks the active manifests and
 adjusts PATH and env for tool subprocesses; it may also point at its own registry directory.
 Registry precedence: ORACLE_REGISTRY, then the profile's `registry`, then config.toml, then
-the repo's registry/tools.
+ORACLE_HOME's registry/tools: the work registry lives outside the repo, since its manifests
+describe internal tools.
 """
 
 import os
@@ -77,7 +78,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         env.get("ORACLE_REGISTRY")
         or (profile.registry if profile else None)
         or (home / Path(from_file).expanduser() if from_file else None)  # relative to ORACLE_HOME
-        or REPO_ROOT / "registry" / "tools"
+        or home / "registry" / "tools"
     )
     return Config(
         home=home,

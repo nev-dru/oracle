@@ -15,8 +15,11 @@ from oracle.evals import (
     judge,
     load_cases,
     ranker_hit,
+    read_golden,
     run_case,
 )
+from oracle.exec.selftest import golden_ops_missing
+from oracle.rank.eval import run_ranker_eval
 from oracle.registry.loader import Registry
 from oracle.render import Answer, Finding
 from tests.conftest import DONE, echo_distiller, plan, scripted
@@ -82,6 +85,49 @@ def test_a_profile_block_adds_its_clauses_and_replaces_the_rubric(tmp_path: Path
     assert case["judge"] == "home rubric"
     (bare,) = load_cases(golden_with(tmp_path, profiles={"home": {"expect": {}}}), profile="home")
     assert bare["judge"] == "shared"
+
+
+def write_cases(path: Path, *cases: dict) -> Path:
+    path.write_text(yaml.safe_dump({"cases": list(cases)}))
+    return path
+
+
+def test_the_home_golden_adds_profile_blocks_and_cases_of_its_own(
+    tmp_path: Path, fake_registry: Registry
+) -> None:
+    home = {"home": {"expect": {"pointers": ["jira:P-1"]}}}
+    repo = golden_with(tmp_path, profiles=home)
+    work = {"default": {"expect": {"pointers": ["jira:REAL-9"]}}}
+    internal = {"id": "internal", "query": "q2", "expect": {"tools_all": ["workiq.nope"]}}
+    overlay = write_cases(tmp_path / "home.yaml", {"id": "c", "profiles": work}, internal)
+    case, extra = load_cases(repo, overlay=overlay)
+    assert case["expect"]["pointers"] == ["jira:REAL-9"] and "unset_profile" not in case
+    assert extra["id"] == "internal"
+    assert load_cases(repo, profile="home", overlay=overlay)[0]["expect"]["pointers"] == [
+        "jira:P-1"
+    ]
+    assert load_cases(repo, overlay=tmp_path / "absent.yaml")[0]["unset_profile"] == NO_PROFILE
+    missing = golden_ops_missing(fake_registry, read_golden(repo, overlay))
+    assert missing == ["workiq.nope"]
+
+
+def test_the_home_golden_cannot_change_a_repo_case(tmp_path: Path) -> None:
+    repo = golden_with(tmp_path, profiles={"home": {"expect": {}}})
+    redefined = write_cases(tmp_path / "a.yaml", {"id": "c", "query": "easier"})
+    with pytest.raises(ValueError, match=r"add profiles only, not \['query'\]"):
+        read_golden(repo, redefined)
+    again = write_cases(tmp_path / "b.yaml", {"id": "c", "profiles": {"home": {"expect": {}}}})
+    with pytest.raises(ValueError, match=r"already has profiles \['home'\]"):
+        read_golden(repo, again)
+
+
+def test_the_ranker_reads_the_home_cases_too(tmp_path: Path, fake_registry: Registry) -> None:
+    repo = write_cases(
+        tmp_path / "r.yaml", {"query": "who is andrew neville", "expect": ["workiq"]}
+    )
+    home = write_cases(tmp_path / "h.yaml", {"query": "jira tickets for OPS", "expect": ["acli"]})
+    report = run_ranker_eval(fake_registry, [repo, home, tmp_path / "absent.yaml"])
+    assert [c.query for c in report.cases] == ["who is andrew neville", "jira tickets for OPS"]
 
 
 def test_a_typo_in_a_profile_block_is_refused(tmp_path: Path) -> None:

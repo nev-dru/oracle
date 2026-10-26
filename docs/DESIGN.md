@@ -118,7 +118,7 @@ Findings are distilled, never raw. Pointers are stable ids the main agent can ha
 
 ## Tool registry
 
-A tool is one YAML file in `registry/tools/<name>.yaml` exposing a small set of named ops. Everything the planner sees, the executor validates, and the codegen emits comes from this file.
+A tool is one YAML file, `<name>.yaml` in the registry directory (`~/.oracle/registry/tools/` unless a profile or config names another), exposing a small set of named ops. Everything the planner sees, the executor validates, and the codegen emits comes from this file.
 
 ```yaml
 name: code-search
@@ -371,7 +371,7 @@ Every invocation writes one record to `~/.oracle/log.sqlite`; the record is the 
 
 **Golden set.** `golden.yaml` holds query → expected tools → expected pointers (at least one that must appear). `oracle eval` runs it, reports pass rate, ranker hit rate, mean tokens and wall time, and diffs against the last run. It runs on every manifest, recipe or prompt change. Failed queries from the logs are promoted into it, so the set grows from real misses.
 
-Each `expect` clause is checked against what actually ran (`oracle/evals.py`): the primitive ops including recipe stages, the recipes used, the breadth flag, the resolved time window, and Coverage computed from execution. An unknown clause fails, so a typo cannot pass. Then a Sonnet judge reads the rendered answer against the `judge` rubric and fails only on a clear miss. `~/.oracle/eval/last.json` keeps each case's result and rendered answer, so a failure can be read without rerunning it. When a case fails, the fix goes into the oracle (ranker text, recipe `when` lines, prompts, fixtures), never into `golden.yaml`. A check that depends on one profile's data, such as the home fixtures' pointers, goes in the case's `profiles.<name>` block (added 2026-10-25): its `expect` clauses join the shared ones and its `judge` replaces the shared rubric. A run without `ORACLE_PROFILE` reads `profiles.default`. A case with blocks for other profiles but none for the running one still runs on its shared checks, then fails, so a data check is never dropped in silence; the saved answer is where the missing block's real pointers come from. `make accept` runs the acceptance on the active registry; the `gate-*` targets run the home profile.
+Each `expect` clause is checked against what actually ran (`oracle/evals.py`): the primitive ops including recipe stages, the recipes used, the breadth flag, the resolved time window, and Coverage computed from execution. An unknown clause fails, so a typo cannot pass. Then a Sonnet judge reads the rendered answer against the `judge` rubric and fails only on a clear miss. `~/.oracle/eval/last.json` keeps each case's result and rendered answer, so a failure can be read without rerunning it. When a case fails, the fix goes into the oracle (ranker text, recipe `when` lines, prompts, fixtures), never into `golden.yaml`. A check that depends on one profile's data, such as the home fixtures' pointers, goes in the case's `profiles.<name>` block (added 2026-10-25): its `expect` clauses join the shared ones and its `judge` replaces the shared rubric. A run without `ORACLE_PROFILE` reads `profiles.default`. A case with blocks for other profiles but none for the running one still runs on its shared checks, then fails, so a data check is never dropped in silence; the saved answer is where the missing block's real pointers come from. `make accept` runs the acceptance on the active registry; the `gate-*` targets run the home profile. On the work laptop the `default` blocks live in `~/.oracle/golden.yaml` (see "On the work laptop, nothing goes back").
 
 **Failure labelling.** Once a week, Sonnet labels low-signal calls with one of: wrong tool, bad params, right data but bad summary, needed more steps, question ambiguous. The distribution says what to fix next. This replaces guessing from individual anecdotes.
 
@@ -402,7 +402,7 @@ oracle/
   config.py         # ~/.oracle/config.toml + env overrides, model strings
   registry/
     schema.py       # pydantic models for manifests, ops, returns, recipes
-    loader.py       # reads registry/tools/*.yaml, validates, caches
+    loader.py       # reads the registry's *.yaml, validates, caches
     importers/      # cli_probe.py, cli_draft.py, mcp_import.py, infer.py (M3); openapi.py, graphql.py later
     safety.py       # mutating-verb check on argv and MCP tool names (load, probe, draft, verify)
     jsonpath.py     # the JSONPath subset, and dotted field access (metadata.name)
@@ -456,8 +456,7 @@ skills/<name>/SKILL.md  # the skills themselves
   exec/selftest.py  # oracle tool test: run manifest examples, check expectations
 adapters/bin/       # thin JSON CLIs over local tools (cmm-graph over codebase-memory-mcp)
 profiles/           # repo-shipped environment profiles (home.toml, home/tools/*.yaml); ~/.oracle/profiles wins
-registry/tools/*.yaml  # the work registry, filled by `oracle tool add`
-registry/recipes/*.yaml
+registry/recipes/README.md  # how to rebuild the seeded recipes at work; the work registry is ~/.oracle/registry/
 golden.yaml  ranker_eval.yaml
 tests/            # unit tests per module + golden runner
   fakes/            # fake acli and workiq CLIs, their fixtures, and the acme fixture code repo
@@ -491,7 +490,9 @@ The oracle is built on a personal laptop that lacks most work tools, then pulled
 - **Fakes.** `tests/fakes/bin/acli` and `workiq` are stdlib Python CLIs with realistic `--help` and JSON output over fixtures in `tests/fakes/data/`, with times stored as offsets from now so "today" stays today. Their flags and output shapes are guesses at the real tools. They double as practice targets for `oracle tool add`. The fake Jira and Confluence understand a strict JQL/CQL subset: AND, OR, parentheses, `=`, `!=`, `~`, `!~`, `IN`, `NOT IN`, `resolution = Unresolved`, and time comparisons on `updated` (`-1d`, `-2w`, `startOfDay()`, `startOfWeek()`, ISO). A clause they cannot evaluate (`reporter was ...`) makes the fake exit 2 with the supported list, so a plan the fake cannot check is an op error, never a false pass.
 - **Fixture code repo.** `tests/fakes/acme/` is a small codebase whose names match the fixtures (`transfer_ownership` and its callers for PLAT-412; `sync_salesforce_changes` → gateway client → ingestion gateway → event bus for INT-77). `make fixtures` indexes it into a repo-local vex db and into codebase-memory (Ollama is needed for the embeddings; `make test` does not need either).
 
-`profiles/home.toml` sets `CMM_REPOS = "acme"` so the code graph sees only the fixture repo and evals do not depend on what else is indexed. It points at its own registry, `profiles/home/tools/`, with code-search (vex), code-graph (`adapters/bin/cmm-graph`) and the two fakes. `registry/tools/` stays the work registry and starts empty: on the work laptop each real tool is added with `oracle tool add`, one at a time, and the home manifests are never touched. Registry precedence is `ORACLE_REGISTRY`, then the profile's `registry`, then `config.toml`, then `registry/tools/`. Op names referenced by `golden.yaml` must survive the re-import: a unit test checks them against the home registry, and `oracle tool test` notes any golden op the active registry lacks.
+`profiles/home.toml` sets `CMM_REPOS = "acme"` so the code graph sees only the fixture repo and evals do not depend on what else is indexed. It points at its own registry, `profiles/home/tools/`, with code-search (vex), code-graph (`adapters/bin/cmm-graph`) and the two fakes. The work registry starts empty: on the work laptop each real tool is added with `oracle tool add`, one at a time, and the home manifests are never touched. Registry precedence is `ORACLE_REGISTRY`, then the profile's `registry`, then `config.toml`, then `~/.oracle/registry/tools/`, with recipes beside the registry in `recipes/`. Op names referenced by `golden.yaml` must survive the re-import: a unit test checks them against the home registry, and `oracle tool test` notes any golden op the active registry lacks.
+
+**On the work laptop, nothing goes back** (decided 2026-10-25). Code goes one way: the personal laptop pushes, the work laptop pulls and never pushes. Everything that names internal tools or data lives under `~/.oracle/`, outside the repo: the registry and its recipes (the default above), and two eval files read on top of the repo's. `~/.oracle/golden.yaml` adds profile blocks to repo cases by id (the real pointers, as `profiles.default`) and cases of its own; it cannot change a repo case's query or checks, or repeat a profile block the repo has. `~/.oracle/ranker_eval.yaml` adds ranker cases. A code fix found at work is made on a local branch and redone at home from a description with no internal names.
 
 **Registry problems and notes.** `oracle tool test` fails on problems: a manifest that does not parse or validate (including a JSONPath outside the supported subset), a name that does not match its file, an unreadable file or a missing registry directory. Expected states are notes and do not fail the gate: a refused mutating tool or op, a `chains_to` or `enum_from` reference to a tool that is not added yet, and golden ops the active registry lacks. A reference to an inactive tool is fine and silent; a reference to a missing op on a tool that is loaded is a typo and a problem. Naming a tool that is not active, or testing nothing at all, fails.
 

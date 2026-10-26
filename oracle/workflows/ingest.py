@@ -18,10 +18,10 @@ import yaml
 from pydantic_ai.models import Model
 
 from oracle.budget import Usage
-from oracle.config import REPO_ROOT, Config
+from oracle.config import Config
 from oracle.exec.executor import Executor, OpResult
 from oracle.exec.selftest import check
-from oracle.rank.eval import run_ranker_eval
+from oracle.rank.eval import ranker_files, run_ranker_eval
 from oracle.registry.importers.cli_draft import (
     DraftContext,
     build_boundary,
@@ -196,7 +196,7 @@ async def _finish(
     if verified is None:
         _write_report(result)
         return result
-    verified = await _boundaries(verified, registry, model, result)
+    verified = await _boundaries(verified, registry, cfg, model, result)
     verified = verified.model_copy(update={"version": deps.version})
     result.manifest = verified
     _write_yaml(result.staged / "manifest.yaml", verified)
@@ -392,14 +392,14 @@ def _relevant_help(op: Op, helps: dict[str, str]) -> str:
 
 
 async def _boundaries(
-    tool: Tool, registry: Registry, model: Model | str, result: IngestResult
+    tool: Tool, registry: Registry, cfg: Config, model: Model | str, result: IngestResult
 ) -> Tool:
     if not registry.tools:
         (result.staged / "boundary.md").write_text(
             f"# Boundary for {tool.name}\n\nThe first tool in this registry: nothing to bound.\n"
         )
         return tool
-    before = _hits(registry)
+    before = _hits(registry, cfg)
     run = await build_boundary(model).run(_boundary_prompt(tool, registry))
     result.usage.add(run.usage)
     bounded = tool.model_copy(
@@ -410,7 +410,8 @@ async def _boundaries(
         }
     )
     result.proposals = [p.model_dump() for p in run.output.proposals if p.tool in registry.tools]
-    after = _hits(Registry(tools={**registry.tools, tool.name: bounded}, recipes=registry.recipes))
+    with_tool = Registry(tools={**registry.tools, tool.name: bounded}, recipes=registry.recipes)
+    after = _hits(with_tool, cfg)
     result.steals = sorted(q for q, hit in before.items() if hit and not after.get(q, False))
     _write_boundary(bounded, result)
     return bounded
@@ -446,8 +447,8 @@ def _write_boundary(bounded: Tool, result: IngestResult) -> None:
     (result.staged / "boundary.md").write_text("\n".join(lines) + "\n")
 
 
-def _hits(registry: Registry) -> dict[str, bool]:
-    report = run_ranker_eval(registry, REPO_ROOT / "ranker_eval.yaml")
+def _hits(registry: Registry, cfg: Config) -> dict[str, bool]:
+    report = run_ranker_eval(registry, ranker_files(cfg.home))
     return {c.query: c.top3 for c in report.cases}
 
 
@@ -468,7 +469,7 @@ async def _candidates(
     extended = Registry(tools={**registry.tools, tool.name: tool}, recipes=registry.recipes)
     path = result.staged / "eval_candidates.yaml"
     path.write_text(yaml.safe_dump({"version": 1, "cases": cases}, sort_keys=False))
-    report = run_ranker_eval(extended, path)
+    report = run_ranker_eval(extended, [path])
     result.candidate_hit_rate = report.rate("top3") if report.cases else None
 
 

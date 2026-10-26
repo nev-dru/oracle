@@ -19,7 +19,7 @@ from pydantic_ai import Agent
 from pydantic_ai.models import Model
 
 from oracle.ask import AskRequest, Models, ask
-from oracle.config import Config
+from oracle.config import REPO_ROOT, Config
 from oracle.plan.digest import defang
 from oracle.registry.loader import Registry
 from oracle.render import Answer, to_markdown, tool_of
@@ -175,14 +175,47 @@ NO_PROFILE = "default"
 PROFILE_KEYS = {"expect", "judge"}
 
 
+def golden_files(home: Path) -> tuple[Path, Path]:
+    """The repo's golden.yaml, and ORACLE_HOME's, which holds what names internal data."""
+    return REPO_ROOT / "golden.yaml", home / "golden.yaml"
+
+
+def read_golden(golden: Path, overlay: Path | None = None) -> list[dict[str, Any]]:
+    """The repo's cases with `overlay` on top. There, a case with a repo case's id adds only
+    profile blocks (the work laptop's real pointers), and any other case is one of its own (a
+    query that names internal data): both stay out of the repo."""
+    cases = {c["id"]: c for c in _cases(golden)}
+    for case in _cases(overlay) if overlay and overlay.is_file() else []:
+        cases[case["id"]] = _on_top(cases.get(case["id"]), case, overlay)
+    return list(cases.values())
+
+
+def _cases(path: Path | None) -> list[dict[str, Any]]:
+    return (yaml.safe_load(path.read_text()) or {}).get("cases", []) if path else []
+
+
+def _on_top(base: dict[str, Any] | None, case: dict[str, Any], source: Path | None) -> dict:
+    if base is None:
+        return case
+    if wrong := sorted(set(case) - {"id", "profiles"}):
+        raise ValueError(f"{source}: {case['id']} is a repo case: add profiles only, not {wrong}")
+    ours, theirs = base.get("profiles") or {}, case.get("profiles") or {}
+    if both := sorted(set(ours) & set(theirs)):
+        raise ValueError(f"{source}: {case['id']} already has profiles {both} in the repo")
+    return {**base, "profiles": {**ours, **theirs}}
+
+
 def load_cases(
-    golden: Path, only: list[str] | None = None, profile: str = NO_PROFILE
+    golden: Path,
+    only: list[str] | None = None,
+    profile: str = NO_PROFILE,
+    overlay: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Each case as `profile` runs it. A case's `profiles` block holds the checks that depend on
     one profile's data (the home fixtures' pointers): its `expect` clauses join the shared ones
     and its `judge` replaces the shared rubric. A case with blocks for other profiles but none
     for this one runs on its shared checks and fails, so a data check is never dropped."""
-    cases = (yaml.safe_load(golden.read_text()) or {}).get("cases", [])
+    cases = read_golden(golden, overlay)
     return [_for_profile(c, profile) for c in cases if not only or c["id"] in only]
 
 

@@ -5,9 +5,7 @@ An op with no example fails: the gate means every active op has run at least onc
 
 import asyncio
 from dataclasses import dataclass
-from pathlib import Path
-
-import yaml
+from typing import Any
 
 from oracle.exec.executor import Executor, OpResult
 from oracle.registry.importers.cli_probe import version_line
@@ -84,15 +82,13 @@ async def version_drift(
     ]
 
 
-def golden_ops_missing(registry: Registry, golden: Path) -> list[str]:
-    """Ops golden.yaml names that this registry lacks: expected while tools are being added
+def golden_ops_missing(registry: Registry, cases: list[dict[str, Any]]) -> list[str]:
+    """Ops the golden cases name that this registry lacks: expected while tools are being added
     one by one, a renamed op otherwise."""
-    if not golden.is_file():
-        return []
     refs = set(registry.op_refs())
     named = {
         ref
-        for case in (yaml.safe_load(golden.read_text()) or {}).get("cases", [])
+        for case in cases
         for key in ("tools_all", "tools_any")
         for ref in case.get("expect", {}).get(key, [])
     }

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml
 
+from oracle.config import REPO_ROOT
 from oracle.rank.index import Ranker
 from oracle.registry.loader import Registry
 
@@ -56,11 +57,17 @@ class RankerReport:
         return out
 
 
-def run_ranker_eval(registry: Registry, path: Path) -> RankerReport:
-    data = yaml.safe_load(path.read_text()) or {}
+def ranker_files(home: Path) -> list[Path]:
+    """The repo's ranker_eval.yaml, then ORACLE_HOME's: on the work laptop, cases that name
+    internal data live there, outside the repo."""
+    return [REPO_ROOT / "ranker_eval.yaml", home / "ranker_eval.yaml"]
+
+
+def run_ranker_eval(registry: Registry, paths: list[Path]) -> RankerReport:
+    """Every case in `paths`; a path that does not exist adds none."""
     ranker = Ranker(registry)
     cases, skipped = [], []
-    for raw in data.get("cases", []):
+    for raw in [c for p in paths if p.is_file() for c in _cases(p)]:
         if not set(raw["expect"]) <= set(registry.tools):
             skipped.append(raw["query"])
             continue
@@ -68,3 +75,7 @@ def run_ranker_eval(registry: Registry, path: Path) -> RankerReport:
         scored = [t.tool for t in ranked if t.score > 0 or t.pinned]
         cases.append(RankerCase(raw["query"], list(raw["expect"]), scored))
     return RankerReport(cases, skipped)
+
+
+def _cases(path: Path) -> list[dict]:
+    return (yaml.safe_load(path.read_text()) or {}).get("cases", [])
