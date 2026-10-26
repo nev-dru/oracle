@@ -11,7 +11,7 @@ import typer
 
 from oracle.config import REPO_ROOT, Config, ConfigError, load_config
 from oracle.exec.pointers import SpillError, expand_spill
-from oracle.exec.selftest import ExampleResult, golden_ops_missing, run_examples
+from oracle.exec.selftest import ExampleResult, golden_ops_missing, run_examples, version_drift
 from oracle.log.store import open_store
 from oracle.registry.loader import Registry, load_registry
 from oracle.render import to_json, to_markdown
@@ -285,18 +285,20 @@ def tool_test(
     from oracle.workflows.protocol import Trace
     from oracle.workflows.runner import call_scope
 
+    only = set(names) if names else None
     with call_scope(cfg, registry, Trace.root("deep")) as executor:  # workflow examples run too
-        results = asyncio.run(run_examples(registry, executor, set(names) if names else None))
-    raise typer.Exit(1 if _report(results, registry) else 0)
+        results = asyncio.run(run_examples(registry, executor, only))
+    drift = asyncio.run(version_drift(registry, cfg.tool_env(), only))
+    raise typer.Exit(1 if _report(results, registry, drift) else 0)
 
 
-def _report(results: list[ExampleResult], registry: Registry) -> int:
+def _report(results: list[ExampleResult], registry: Registry, drift: list[str]) -> int:
     """Print example results, manifest problems and notes; return the number of failures."""
     for r in sorted(results, key=lambda r: (r.op, r.index)):
         typer.echo(f"{'PASS' if r.ok else 'FAIL'}  {r.op}[{r.index}]  {r.detail}  ({r.ms} ms)")
     for problem in registry.problems:
         typer.echo(f"FAIL  manifest  {problem}")
-    notes = list(registry.notes)
+    notes = [*registry.notes, *drift]
     missing = golden_ops_missing(registry, REPO_ROOT / "golden.yaml")
     if missing:
         notes.append(f"golden.yaml names ops this registry lacks: {', '.join(missing)}")

@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from oracle.exec.executor import Executor, OpResult
+from oracle.registry.importers.cli_probe import version_line
 from oracle.registry.jsonpath import get_field
 from oracle.registry.loader import Registry
 from oracle.registry.schema import Example
@@ -63,6 +64,24 @@ def check(result: OpResult, example: Example) -> tuple[bool, str]:
             return False, f"result {i} lacks fields {missing}"
     pages = f", {result.pages} pages" if result.pages > 1 else ""
     return True, f"{n} results{pages}"
+
+
+async def version_drift(
+    registry: Registry, env: dict[str, str], only: set[str] | None = None
+) -> list[str]:
+    """A note for each tool whose binary no longer gives the version its manifest recorded."""
+    asked = {
+        t.name: t.version
+        for t in registry.tools.values()
+        if t.version and (not only or t.name in only)
+    }
+    now = await asyncio.gather(*(version_line(v.argv, env) for v in asked.values()))
+    return [
+        f"{name}: version changed from {v.seen!r} to {seen or 'no answer'!r}; its examples "
+        "above ran against this one, so update version.seen once they pass"
+        for (name, v), seen in zip(asked.items(), now, strict=True)
+        if seen != v.seen
+    ]
 
 
 def golden_ops_missing(registry: Registry, golden: Path) -> list[str]:

@@ -62,4 +62,30 @@ cases:
       home:
         expect:
           pointers: ["jira:OPS-1206", "conf:90011", "people:u-1003"]
-        judge: "Findings cover the open ticket, the gateway runbook and who wrote it (Priya Raman, her role), each with a pointer; Coverage lists the crawl's hops; nothing is invented."
+        judge: "Findings cover the open ticket, the gateway runbook and who wrote it (Priya Raman and the role the directory gives), each with a pointer; Coverage lists the crawl's hops; nothing is invented."
+
+  - id: design-author-team
+    query: "who wrote the ownership transfer design and what team are they on"
+    level: standard
+    expect:
+      tools_all: [acli.confluence.search, workiq.people.lookup]
+      findings_min: 2
+    judge: "The design doc is cited with a pointer, and its author's role and team come from the directory with a pointer; the doc and its author are separate findings; nothing is invented."
+    profiles:
+      home:
+        expect:
+          pointers: ["conf:88190", "people:u-1001"]
+        judge: "The design doc is cited with a pointer, and its author Andrew Neville is named with the role (Staff Software Engineer) and team (Platform Engineering) the directory gives with a pointer; the doc and its author are separate findings; nothing is invented."
+
+  - id: reviewer-first-name-only
+    query: "who reviewed the gateway runbook"
+    level: standard
+    expect:
+      tools_all: [acli.confluence.search, workiq.people.lookup]
+      findings_min: 2
+    judge: "The page naming the reviewer is cited with a pointer. If the directory holds more than one person with that name, the answer lists every candidate with a pointer and the evidence for each and says the name is ambiguous, unless the page's own evidence narrows it to one; it never picks one silently."
+    profiles:
+      home:
+        expect:
+          pointers: ["conf:90012", "people:u-1005", "people:u-1006"]
+        judge: "The review page is cited with a pointer. It names only \"Jon\", and the directory holds Jon Bell and Jon Alvarez: the answer lists both, each with a pointer and role, and says the page does not say which; it never picks one silently."

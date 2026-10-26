@@ -35,7 +35,7 @@ from oracle.registry.importers.cli_probe import probe_cli
 from oracle.registry.importers.infer import infer_returns
 from oracle.registry.jsonpath import get_field
 from oracle.registry.loader import Registry, refusal
-from oracle.registry.schema import NAME, Example, Expect, Op, Returns, Tool
+from oracle.registry.schema import NAME, Example, Expect, Op, Returns, Tool, ToolVersion
 
 
 class IngestError(RuntimeError):
@@ -89,7 +89,8 @@ async def ingest_cli(
     if probe.path is None:
         raise IngestError(f"{binary!r} is not on PATH (profile PATH included)")
     result.refused = probe.refused
-    deps = DraftContext(name=name, binary=binary)
+    version = ToolVersion(argv=probe.version_argv, seen=probe.version) if probe.version else None
+    deps = DraftContext(name=name, binary=binary, version=version)
     drafted = await build_drafter(model).run(render_probe(probe, registry), deps=deps)
     result.usage.add(drafted.usage)
     return await _finish(drafted.output, probe.helps, cfg, registry, model, deps, result)
@@ -196,6 +197,7 @@ async def _finish(
         _write_report(result)
         return result
     verified = await _boundaries(verified, registry, model, result)
+    verified = verified.model_copy(update={"version": deps.version})
     result.manifest = verified
     _write_yaml(result.staged / "manifest.yaml", verified)
     await _candidates(verified, registry, cfg, model, result)

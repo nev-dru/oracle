@@ -37,6 +37,7 @@ Then check these three things:
 - Golden op names survive. `oracle tool test` notes any op in `golden.yaml` that the work registry lacks. Prefer naming the work op to match. If a name truly differs, propose the `golden.yaml` change and wait.
 - kubectl cannot return secrets. Its resource-type enum must leave out `secrets` (and `configmaps` if they hold credentials here). Redaction (`exec/redact.py`) is the second line of defence, not the first.
 - Auth comes from env vars only (`auth.env` in the manifest), never from argv.
+- Each manifest has a `version` block. If a CLI answers neither `--version` nor `version --client`, write the block by hand with the argv that prints its version.
 
 Finish with `oracle tool test --ranker`. It must be at or above 90% top-3.
 
@@ -63,10 +64,9 @@ In this order. Each needs its gate first (see the rules above).
 
 1. **Caching** (DESIGN.md, "Caching, prior findings"): op results across calls with a per-tool `cache_ttl` in the manifest; plans keyed on the normalised query, intent and ranked op set (7 days, invalidated when a manifest, recipe or prompt changes); and reported findings per session ("see call 12"). Only the pointers table exists today.
 2. **Prior findings as a source**: `findings.search`, ranked like any tool, under the three rules in DESIGN.md (a lead with provenance, validity keyed to the source, stored with its Coverage).
-3. **The two planned golden cases** (DESIGN.md, "Golden set", planned cases): the name follow-up with a full name, and the one with a first name only and two candidates.
-4. **Tool drift**: each manifest records the tool's binary version, and `oracle tool test` runs weekly as a scheduled task and when a version changes.
-5. **Open items from "Workflows as tools"**: one budget per trace shared through `log.sqlite`, and `oracle report` drawing the call tree. (Ingestion as a workflow is deliberately a command; confirm before building it.)
-6. **Dreaming, the rest of it** (DESIGN.md, "Dreaming"), after two or three weeks of work logs: today `oracle dream` only proposes recipes from repeated crawl chains. Still to build are stages 1 to 7: transcripts into a day table, labelling, the other proposal classes, eval-gated promotion, `dreams/<date>.md`, memory maintenance, and the weekly trend. Transcripts are the one place sensitive content enters an oracle process; keep only the query, the result summary and the next user message.
+3. **Tool drift, the schedule**: manifests already record the binary's version and `oracle tool test` notes a change. Left: run `oracle tool test` weekly as a scheduled task, and ask how the user wants a drift note delivered.
+4. **Open items from "Workflows as tools"**: one budget per trace shared through `log.sqlite`, and `oracle report` drawing the call tree. (Ingestion as a workflow is deliberately a command; confirm before building it.)
+5. **Dreaming, the rest of it** (DESIGN.md, "Dreaming"), after two or three weeks of work logs: today `oracle dream` only proposes recipes from repeated crawl chains. Still to build are stages 1 to 7: transcripts into a day table, labelling, the other proposal classes, eval-gated promotion, `dreams/<date>.md`, memory maintenance, and the weekly trend. Transcripts are the one place sensitive content enters an oracle process; keep only the query, the result summary and the next user message.
 
 ## Build only when triggered
 

@@ -2,5 +2,6 @@
   {"id": "88123", "space": "ARCH", "title": "Salesforce to Cloud integration design", "excerpt": "The Salesforce outbound connector publishes change events to the cloud ingestion gateway, which validates and writes to the event bus. Auth uses a refreshed service token.", "author": "Sam Ortiz", "updated_offset_h": -400},
   {"id": "88190", "space": "ARCH", "title": "Ownership transfer: design and invariants", "excerpt": "A transfer moves a resource from one owner to another atomically and always writes an audit record, including when the previous owner is deactivated.", "author": "Andrew Neville", "updated_offset_h": -900},
   {"id": "90011", "space": "OPS", "title": "Runbook: ingestion gateway 5xx", "excerpt": "Check the Salesforce batch window first; scale the gateway before retrying.", "author": "Priya Raman", "updated_offset_h": -120},
+  {"id": "90012", "space": "OPS", "title": "Gateway runbook review", "excerpt": "Jon reviewed the gateway runbook.", "author": "Priya Raman", "updated_offset_h": -100},
   {"id": "90240", "space": "TEAM", "title": "Platform team: who owns what", "excerpt": "Andrew Neville leads accounts and ownership; Priya Raman owns billing and deploys; Sam Ortiz owns integrations.", "author": "Priya Raman", "updated_offset_h": -300}
 ]

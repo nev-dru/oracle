@@ -15,7 +15,7 @@ from oracle.config import REPO_ROOT
 from oracle.registry.importers.cli_probe import Probe
 from oracle.registry.loader import Registry
 from oracle.registry.safety import op_problem
-from oracle.registry.schema import Op, Tool
+from oracle.registry.schema import Op, Tool, ToolVersion
 from oracle.skills.loader import skill_text
 
 SKILLS = REPO_ROOT / "skills"
@@ -36,6 +36,8 @@ class DraftContext:
     binary: str
     mcp: bool = False
     """True for an MCP import: ops must call the server's tools and never carry argv."""
+    version: ToolVersion | None = None
+    """What the probe read from the binary; the manifest records it, whatever the draft says."""
 
 
 def op_problems(op: Op, binary: str, mcp: bool = False) -> list[str]:

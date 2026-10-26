@@ -129,6 +129,14 @@ class Limits(Strict):
     max_output_kb: int = Field(default=256, ge=1)
 
 
+class ToolVersion(Strict):
+    """What the binary said its version was when the manifest was made, and the argv that asked
+    it. `oracle tool test` asks again and notes a change: a CLI upgrade can change a flag."""
+
+    argv: list[str] = Field(min_length=1)
+    seen: str
+
+
 class Tool(Strict):
     name: str = Field(pattern=NAME)
     description: str
@@ -142,6 +150,8 @@ class Tool(Strict):
     """A workflow is trusted Python under the profile's workflows/, run in-process."""
     skills: list[str] = Field(default_factory=list, description="tool-scoped skills to attach")
     mcp: McpServer | None = None
+    version: ToolVersion | None = None
+    """Recorded by `oracle tool add` from the probe, never drafted by a model."""
     ops: list[Op] = Field(min_length=1)
 
     @model_validator(mode="after")

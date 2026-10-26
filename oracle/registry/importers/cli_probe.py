@@ -25,6 +25,7 @@ class Probe:
     binary: str
     path: str | None
     version: str | None = None
+    version_argv: list[str] = field(default_factory=list)  # how `version` was asked
     helps: dict[str, str] = field(default_factory=dict)  # "" is the root; "jira workitem"
     refused: list[str] = field(default_factory=list)  # mutating subcommands, never run
     truncated: bool = False
@@ -34,6 +35,10 @@ class Probe:
 
 
 def subcommand_names(text: str) -> list[str]:
+    return [n for n in _listed(text) if n not in SKIP]
+
+
+def _listed(text: str) -> list[str]:
     names: list[str] = []
     for group in BRACES.findall(text):
         names += group.split(",")
@@ -48,7 +53,7 @@ def subcommand_names(text: str) -> list[str]:
                 names.append(m[1])
             else:  # a blank line or any other text ends the command list
                 in_section = False
-    return list(dict.fromkeys(n for n in names if n not in SKIP))
+    return list(dict.fromkeys(names))
 
 
 async def _run(argv: list[str], env: dict[str, str], timeout: float) -> str:
@@ -85,7 +90,6 @@ async def probe_cli(
     probe = Probe(tool=tool, binary=binary, path=shutil.which(binary, path=env.get("PATH")))
     if probe.path is None:
         return probe
-    probe.version = await _version(binary, env)
     queue: list[list[str]] = [[]]
     used = 0
     while queue:
@@ -100,6 +104,8 @@ async def probe_cli(
         used += len(text)
         if len(words) < max_depth:
             queue += _children(probe, words, text)
+    if asked := await _version(binary, env, probe.helps.get("", "")):
+        probe.version_argv, probe.version = asked
     return probe
 
 
@@ -115,7 +121,22 @@ def _children(probe: Probe, words: list[str], text: str) -> list[list[str]]:
     return out
 
 
-async def _version(binary: str, env: dict[str, str]) -> str | None:
-    text = (await _run([binary, "--version"], env, 5.0)).strip()
+async def _version(
+    binary: str, env: dict[str, str], root_help: str
+) -> tuple[list[str], str] | None:
+    """The first way of asking that answers: `--version`, then the `version` subcommand when the
+    root help lists one, with `--client` first so kubectl and argocd do not ask a server."""
+    asks = [["--version"]]
+    if "version" in _listed(root_help):
+        asks += [["version", "--client"], ["version"]]
+    for words in asks:
+        if seen := await version_line([binary, *words], env):
+            return [binary, *words], seen
+    return None
+
+
+async def version_line(argv: list[str], env: dict[str, str]) -> str | None:
+    """The first line of what `argv` printed, unless it is an error or a usage message."""
+    text = (await _run(argv, env, 5.0)).strip()
     first = text.splitlines()[0][:200] if text else ""
     return None if re.search(r"(?i)error|unknown|usage", first) else first or None

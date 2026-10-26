@@ -46,6 +46,7 @@ def add_search(sub: argparse._SubParsersAction, kind: str) -> None:  # type: ign
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="workiq", description="Work IQ CLI (fake)")
+    p.add_argument("--version", action="version", version="workiq 0.9.0 (fake)")
     area = p.add_subparsers(dest="area", required=True)
 
     people = area.add_parser("people", help="directory").add_subparsers(dest="verb", required=True)

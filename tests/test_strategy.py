@@ -29,7 +29,7 @@ async def test_a_failed_plan_is_a_failure_not_a_traceback(
     def down(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         raise RuntimeError("model down")
 
-    req = AskRequest("who is jon", level="quick")
+    req = AskRequest("who is quinn", level="quick")
     ctx = context(home_cfg, fake_registry, Models(planner=FunctionModel(down)), req)
     out = await strategy_for("quick", False).run(ctx)
     assert out.runs == [] and out.plan is None
@@ -41,14 +41,14 @@ async def test_checked_replans_and_keeps_the_last_checks_gaps(
 ) -> None:
     retry = {
         "complete": False,
-        "gaps": ["no person named jon"],
+        "gaps": ["no person named quinn"],
         "next_steps": [
             {"id": "s2", "op": "workiq.people.lookup", "params": {"name": "andrew neville"}}
         ],
     }
-    first = plan({"id": "s1", "op": "workiq.people.lookup", "params": {"name": "jon"}})
+    first = plan({"id": "s1", "op": "workiq.people.lookup", "params": {"name": "quinn"}})
     models = Models(planner=scripted(first), checker=scripted(retry, DONE))
-    ctx = context(home_cfg, fake_registry, models, AskRequest("who is jon"))
+    ctx = context(home_cfg, fake_registry, models, AskRequest("who is quinn"))
     out = await strategy_for("standard", False).run(ctx)
     assert out.replans == 1 and out.round_name == "replan"
     assert [(r.op, r.round) for r in out.runs] == [

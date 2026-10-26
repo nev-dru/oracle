@@ -164,6 +164,7 @@ Field by field, and the corner case each exists for:
 | `enum_from` | Values that come from another op | The executor resolves it (cached per session) so the planner picks from real repo names. |
 | `async` | `{submit: op, poll: op, done: "$.status == 'complete'"}` | Long-running jobs (ES async search, large k8s queries). |
 | `examples` | Real invocations | Doubles as the smoke test for `oracle tool test`. |
+| `version` | `{argv: [kubectl, version, --client], seen: "Client Version: v1.31.0"}`, written by `oracle tool add` from the probe, never by a model | Tool drift: `oracle tool test` asks again and notes a change, so an upgrade that renamed a flag is caught by the examples it reruns. The probe tries `--version`, then a listed `version` subcommand with `--client` first, so it never asks a server. |
 | `escape` | `{argv: ["kubectl"], allow: deep}` | Raw arguments for the long tail, deep tier only, logged loudly, still subject to a read-only subcommand allowlist. |
 
 **Import paths.** `oracle tool add` drafts a manifest from the best available source and then runs the examples:
@@ -387,7 +388,7 @@ Milestone 2 is done when all four pass at `standard` with Coverage reporting wha
 
 Add to the set as misses appear. A query is only added with the tool list it *should* have used, so the set encodes intent, not current behaviour.
 
-**Planned cases, added only once the phases that support them exist** (decided 2026-10-24):
+**Planned cases, added only once the phases that support them exist** (decided 2026-10-24; the two name follow-ups were added on 2026-10-25 as `design-author-team` and `reviewer-first-name-only`, with the page 90012 and two Jons in the home fixtures):
 
 - **Name follow-up, full name** (after M2's completeness check): "who wrote the ownership transfer design and what team are they on" → `acli.confluence.search` → author → `workiq.people.lookup`. Passes when the findings carry the author's role and team with pointers.
 - **Name follow-up, first name only** (after M2): a fixture page that says only "Jon reviewed the gateway runbook", with two Jons in the directory. Passes when the findings list both candidates with the evidence for each and Coverage marks the ambiguity, or narrow to one using the page's evidence; never a silent pick.
@@ -629,7 +630,7 @@ If `findings.search` wins a query outright, the output says so and the Refine se
 - **Secrets in output.** Env-var auth keeps secrets out of argv, but `kubectl get secret` or a config dump can return them. Default: a per-tool denylist of resources and a regex redaction pass (tokens, keys, connection strings) on every op result before caching or distilling. The redaction pass ships in M2 (`exec/redact.py`); the per-tool denylist comes with the kubectl manifest in M3.
 - **Duplicate entities across sources.** The same ticket via acli and via ES, the same person via workiq and git. Default: distill dedupes on pointer identity and on normalised ids (ticket key, email); grouped, not repeated.
 - **Environment profiles.** Home has a subset of the tools. Default: `~/.oracle/profiles/<name>.toml` (falling back to the repo's `profiles/`) selects which manifests are active and adds `path_prepend` and `env` for tool subprocesses; inactive tools appear in Coverage as "not available here", not as gaps. Pulled forward into M1 in minimal form so the personal laptop can run the gates.
-- **Tool drift.** A CLI upgrade changes a flag. Default: the manifest records the binary version; `oracle tool test` runs weekly as a scheduled task and on version change.
+- **Tool drift.** A CLI upgrade changes a flag. Default: the manifest records the binary version; `oracle tool test` runs weekly as a scheduled task and on version change. Built 2026-10-25: the manifest's `version` (see the field table) and the drift note in `oracle tool test`; the weekly schedule is set up on the work laptop.
 - **Relative time.** "Today", "since yesterday", "this sprint" resolve in the user's timezone from the config, and the resolved absolute range is printed in the trace. M2 resolves today, yesterday, this week, last week and "past/last N hours/days/weeks" deterministically before planning; "this sprint" needs the tracker and stays with the planner.
 - **Binary or non-UTF-8 output.** Default: write to a temp file, return a pointer and the first 1 KB as hex; never hand bytes to a model.
 - **Partial failures in breadth mode.** Default: never fail the call; every failed source is named in Coverage with its error class.

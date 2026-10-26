@@ -9,12 +9,13 @@ import pytest
 import yaml
 
 from oracle.config import Config
+from oracle.exec.selftest import version_drift
 from oracle.registry.importers.cli_draft import DraftContext
 from oracle.registry.importers.cli_probe import probe_cli, subcommand_names
 from oracle.registry.importers.infer import infer_returns
 from oracle.registry.loader import load_registry
 from oracle.registry.safety import argv_problem, mcp_problem, rendered_problem
-from oracle.registry.schema import Tool
+from oracle.registry.schema import Tool, ToolVersion
 from oracle.workflows.ingest import IngestError, _verify_op, activate, ingest_cli
 from tests.conftest import REGISTRY, scripted
 
@@ -91,6 +92,55 @@ async def test_drafted_mutating_op_never_reaches_a_subprocess(
     assert kept is None and "mutating" in detail
     assert not marker.exists()
     assert argv_problem(["kubectl", "delete", "pod", "{name}"])
+
+
+VERCTL = """#!/bin/sh
+# kubectl-style: no --version flag, and a bare `version` asks the server.
+case "$*" in
+  "--version") echo "error: unknown flag: --version"; exit 1;;
+  "version --client") echo "Client Version: v1.31.0"; echo "Kustomize Version: v5.4.2"; exit 0;;
+  "version") echo asked > "{marker}"; echo "Server Version: v1.30.2"; exit 0;;
+esac
+cat <<'HELP'
+verctl controls things.
+
+Available Commands:
+  get         Show things
+  version     Print the client and server version information
+
+Flags:
+  -h, --help   help for verctl
+HELP
+"""
+
+
+async def test_probe_asks_a_version_subcommand_for_the_client_only(tmp_path: Path) -> None:
+    marker = tmp_path / "ASKED_SERVER"
+    binary = tmp_path / "bin" / "verctl"
+    binary.parent.mkdir()
+    binary.write_text(VERCTL.replace("{marker}", str(marker)))
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+    probe = await probe_cli("verctl", "verctl", env_with(binary))
+    assert probe.version_argv == ["verctl", "version", "--client"]
+    assert probe.version == "Client Version: v1.31.0"
+    assert not marker.exists()
+
+
+async def test_tool_test_notes_a_version_the_binary_no_longer_gives(
+    home_cfg: Config, tmp_path: Path
+) -> None:
+    manifest = yaml.safe_load((REGISTRY / "workiq.yaml").read_text())
+    for name, seen in (("workiq", "workiq 0.9.0 (fake)"), ("directory", "workiq 0.8.0 (fake)")):
+        version = {"argv": ["workiq", "--version"], "seen": seen}
+        (tmp_path / f"{name}.yaml").write_text(
+            yaml.safe_dump({**manifest, "name": name, "version": version})
+        )
+    notes = await version_drift(load_registry(tmp_path), home_cfg.tool_env())
+    assert notes == [
+        "directory: version changed from 'workiq 0.8.0 (fake)' to 'workiq 0.9.0 (fake)'; its "
+        "examples above ran against this one, so update version.seen once they pass"
+    ]
+    assert await version_drift(load_registry(tmp_path), home_cfg.tool_env(), {"workiq"}) == []
 
 
 def test_loader_refuses_declared_read_only_but_mutating_argv(tmp_path: Path) -> None:
@@ -178,8 +228,8 @@ async def test_ingest_stages_a_grounded_manifest_and_activates_on_request(
     def respond(messages, info):  # type: ignore[no-untyped-def]
         schema = info.output_tools[0].parameters_json_schema
         props = set(schema.get("properties", {}))
-        if "ops" in props:
-            body = draft_for_workiq()
+        if "ops" in props:  # a drafted version is a guess; the probe's replaces it
+            body = {**draft_for_workiq(), "version": {"argv": ["workiq", "about"], "seen": "9"}}
         elif "proposals" in props:
             body = {
                 "description": "People directory: titles, teams and managers.",
@@ -198,6 +248,8 @@ async def test_ingest_stages_a_grounded_manifest_and_activates_on_request(
     lookup = result.manifest.op("lookup")
     assert lookup.returns.path == "$.people[*]" and lookup.returns.id_field == "id"
     assert lookup.examples[0].expect.min_results == 1
+    asked = ToolVersion(argv=["workiq", "--version"], seen="workiq 0.9.0 (fake)")
+    assert result.manifest.version == asked
     for f in (
         "probe.json",
         "draft.yaml",
@@ -210,6 +262,7 @@ async def test_ingest_stages_a_grounded_manifest_and_activates_on_request(
     assert "directory" not in load_registry(tmp_path / "registry").tools  # staged, not active
     target = activate(cfg, "directory")
     assert target.is_file() and "directory" in load_registry(tmp_path / "registry").tools
+    assert yaml.safe_load(target.read_text())["version"]["seen"] == "workiq 0.9.0 (fake)"
     with pytest.raises(IngestError, match="exists"):
         activate(cfg, "directory")
     with pytest.raises(IngestError, match="already has a manifest"):

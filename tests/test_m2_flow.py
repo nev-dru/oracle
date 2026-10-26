@@ -67,15 +67,15 @@ async def test_check_replans_with_new_steps_then_stops(
 ) -> None:
     retry = {
         "complete": False,
-        "gaps": ["no person named jon"],
+        "gaps": ["no person named quinn"],
         "next_steps": [
             {"id": "s2", "op": "workiq.people.lookup", "params": {"name": "andrew neville"}}
         ],
     }
     m = models(
-        plan({"id": "s1", "op": "workiq.people.lookup", "params": {"name": "jon"}}), retry, DONE
+        plan({"id": "s1", "op": "workiq.people.lookup", "params": {"name": "quinn"}}), retry, DONE
     )
-    answer = await ask(AskRequest("who is jon"), home_cfg, fake_registry, m)
+    answer = await ask(AskRequest("who is quinn"), home_cfg, fake_registry, m)
     assert answer.replans == 1 and "replan 1:" in answer.trace
     assert answer.ops_run == ["workiq.people.lookup", "workiq.people.lookup"]
     assert answer.no_match == []  # the source did match once
